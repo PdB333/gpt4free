@@ -441,12 +441,6 @@ model_map = {
     "OpenRouter": "google/gemini-3-pro",
     "Yupp": "gemini-3-pro"
   },
-  "gemini-3-reasoning": {
-    "GeminiCLI": "gemini-3-reasoning"
-  },
-  "gemini-3-pro": {
-    "GeminiCLI": "gemini-3-pro"
-  },
   "codegemma-7b": {
     "DeepInfra": "google/codegemma-7b-it",
     "Nvidia": "google/codegemma-7b"

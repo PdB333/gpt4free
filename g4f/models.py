@@ -561,7 +561,19 @@ gemini_2_5_pro = Model(
 gemini_3_pro_preview = Model(
     name          = 'gemini-3-pro-preview',
     base_provider = 'Google',
-    best_provider = GeminiCLI
+    best_provider = IterListProvider([Gemini, GeminiPro, GeminiCLI])
+)
+
+gemini_3_reasoning = Model(
+    name          = 'gemini-3-reasoning',
+    base_provider = 'Google',
+    best_provider = IterListProvider([Gemini, GeminiPro, GeminiCLI])
+)
+
+gemini_3_pro = Model(
+    name          = 'gemini-3-pro',
+    base_provider = 'Google',
+    best_provider = IterListProvider([Gemini, GeminiPro, GeminiCLI])
 )
 
 gemini_3_reasoning = Model(
