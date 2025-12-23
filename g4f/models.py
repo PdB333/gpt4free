@@ -576,6 +576,18 @@ gemini_3_pro = Model(
     best_provider = IterListProvider([Gemini, GeminiPro, GeminiCLI])
 )
 
+gemini_3_reasoning = Model(
+    name          = 'gemini-3-reasoning',
+    base_provider = 'Google',
+    best_provider = GeminiCLI
+)
+
+gemini_3_pro = Model(
+    name          = 'gemini-3-pro',
+    base_provider = 'Google',
+    best_provider = GeminiCLI
+)
+
 # codegemma
 codegemma_7b = Model(
     name          = 'codegemma-7b',
