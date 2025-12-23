@@ -1075,12 +1075,20 @@ ModelRegistry._aliases["chatgpt-5.2"] = "gpt-5.2"
 ModelRegistry._aliases["chatgpt-5-2"] = "gpt-5.2"
 ModelRegistry._aliases["chatgpt5.2"] = "gpt-5.2"
 ModelRegistry._aliases["chatgpt5-2"] = "gpt-5.2"
+ModelRegistry._aliases["ChatGPT 5.2"] = "gpt-5.2"
+ModelRegistry._aliases["ChatGPT 5-2"] = "gpt-5.2"
+ModelRegistry._aliases["chatgpt 5.2"] = "gpt-5.2"
+ModelRegistry._aliases["chatgpt 5-2"] = "gpt-5.2"
 # Support dashed GPT-5.2 identifiers used in some clients
 ModelRegistry._aliases["gpt-5-2"] = "gpt-5.2"
 ModelRegistry._aliases["gpt-5-2-instant"] = "gpt-5.2-instant"
 ModelRegistry._aliases["gpt-5-2-thinking"] = "gpt-5.2-thinking"
 # Friendly Gemini 3 mapping
 ModelRegistry._aliases["gemini-3"] = "gemini-3-pro"
+ModelRegistry._aliases["Gemini 3"] = "gemini-3-pro"
+ModelRegistry._aliases["gemini 3"] = "gemini-3-pro"
+ModelRegistry._aliases["Gemini 3 Pro"] = "gemini-3-pro"
+ModelRegistry._aliases["gemini 3 pro"] = "gemini-3-pro"
 
 # Fill the convert dictionary
 ModelUtils.convert = ModelRegistry.all_models()
