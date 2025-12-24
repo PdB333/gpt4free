@@ -128,10 +128,11 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
     _last_conversation: Conversation | None = None
 
     @classmethod
-    def _get_conversation_key(cls, auth_result: AuthResult):
+    def _get_conversation_key(cls, auth_result: AuthResult, conversation_id: str | None = None):
         cookies = getattr(auth_result, "cookies", None) or cls._cookies or {}
         api_key = getattr(auth_result, "api_key", None) or cls._api_key
-        key = cookies.get("oai-did") or api_key
+        base_key = cookies.get("oai-did") or api_key
+        key = (conversation_id, base_key) if conversation_id is not None else base_key
         if isinstance(key, str):
             key = key.strip()
         return key
@@ -444,14 +445,16 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                 image_model = True
                 model = cls.default_model
             cookies = getattr(auth_result, "cookies", None) or cls._cookies or {}
-            conversation_key = cls._get_conversation_key(auth_result)
+            conversation_key = cls._get_conversation_key(auth_result, conversation_id)
             if conversation is None and conversation_key:
                 conversation = cls._conversation_cache.get(conversation_key)
-            if conversation is None and cls._last_conversation is not None:
+            if conversation_id is not None and conversation is not None and conversation.conversation_id != conversation_id:
+                conversation = None
+            if conversation is None and cls._last_conversation is not None and conversation_id is None:
                 conversation = cls._last_conversation
 
             if conversation is None:
-                conversation = Conversation(None, str(uuid.uuid4()), cookies.get("oai-did"))
+                conversation = Conversation(conversation_id, str(uuid.uuid4()), cookies.get("oai-did"))
             else:
                 conversation = copy(conversation)
 
