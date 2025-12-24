@@ -122,12 +122,16 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
     _cookies: Cookies = None
     _expires: int = None
     _conversation_cache: dict = {}
+    _last_conversation: Conversation | None = None
 
     @classmethod
     def _get_conversation_key(cls, auth_result: AuthResult):
         cookies = getattr(auth_result, "cookies", None) or cls._cookies or {}
         api_key = getattr(auth_result, "api_key", None) or cls._api_key
-        return cookies.get("oai-did") or api_key
+        key = cookies.get("oai-did") or api_key
+        if isinstance(key, str):
+            key = key.strip()
+        return key
 
     @classmethod
     async def on_auth_async(cls, proxy: str = None, **kwargs) -> AsyncIterator:
@@ -440,6 +444,8 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
             conversation_key = cls._get_conversation_key(auth_result)
             if conversation is None and conversation_key:
                 conversation = cls._conversation_cache.get(conversation_key)
+            if conversation is None and cls._last_conversation is not None:
+                conversation = cls._last_conversation
 
             if conversation is None:
                 conversation = Conversation(None, str(uuid.uuid4()), cookies.get("oai-did"))
@@ -730,6 +736,8 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
 
             if conversation_key:
                 cls._conversation_cache[conversation_key] = conversation
+            else:
+                cls._last_conversation = conversation
 
             yield FinishReason(conversation.finish_reason)
 
