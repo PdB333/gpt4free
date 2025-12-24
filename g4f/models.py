@@ -286,6 +286,43 @@ gpt_4_5 = Model(
     best_provider = OpenaiChat
 )
 
+# gpt-5
+gpt_5 = Model(
+    name          = 'gpt-5',
+    base_provider = 'OpenAI',
+    best_provider = IterListProvider([OpenaiChat, OpenRouter, PuterJS])
+)
+
+gpt_5_instant = Model(
+    name          = 'gpt-5-instant',
+    base_provider = 'OpenAI',
+    best_provider = IterListProvider([OpenaiChat, OpenRouter, PuterJS])
+)
+
+gpt_5_thinking = Model(
+    name          = 'gpt-5-thinking',
+    base_provider = 'OpenAI',
+    best_provider = IterListProvider([OpenaiChat, OpenRouter, PuterJS])
+)
+
+gpt_5_2 = Model(
+    name          = 'gpt-5.2',
+    base_provider = 'OpenAI',
+    best_provider = IterListProvider([OpenaiChat, OpenRouter, PuterJS])
+)
+
+gpt_5_2_instant = Model(
+    name          = 'gpt-5.2-instant',
+    base_provider = 'OpenAI',
+    best_provider = IterListProvider([OpenaiChat, OpenRouter, PuterJS])
+)
+
+gpt_5_2_thinking = Model(
+    name          = 'gpt-5.2-thinking',
+    base_provider = 'OpenAI',
+    best_provider = IterListProvider([OpenaiChat, OpenRouter, PuterJS])
+)
+
 gpt_oss_120b = Model(
     name          = 'gpt-oss-120b',
     long_name     = 'openai/gpt-oss-120b',
@@ -524,7 +561,19 @@ gemini_2_5_pro = Model(
 gemini_3_pro_preview = Model(
     name          = 'gemini-3-pro-preview',
     base_provider = 'Google',
-    best_provider = GeminiCLI
+    best_provider = IterListProvider([Gemini, GeminiPro, GeminiCLI])
+)
+
+gemini_3_reasoning = Model(
+    name          = 'gemini-3-reasoning',
+    base_provider = 'Google',
+    best_provider = IterListProvider([Gemini, GeminiPro, GeminiCLI])
+)
+
+gemini_3_pro = Model(
+    name          = 'gemini-3-pro',
+    base_provider = 'Google',
+    best_provider = IterListProvider([Gemini, GeminiPro, GeminiCLI])
 )
 
 # codegemma
@@ -1021,6 +1070,25 @@ class ModelUtils:
 
 # Register special aliases after all models are created
 ModelRegistry._aliases["gemini"] = "gemini-2.0"
+# Friendly ChatGPT 5.2 aliases
+ModelRegistry._aliases["chatgpt-5.2"] = "gpt-5.2"
+ModelRegistry._aliases["chatgpt-5-2"] = "gpt-5.2"
+ModelRegistry._aliases["chatgpt5.2"] = "gpt-5.2"
+ModelRegistry._aliases["chatgpt5-2"] = "gpt-5.2"
+ModelRegistry._aliases["ChatGPT 5.2"] = "gpt-5.2"
+ModelRegistry._aliases["ChatGPT 5-2"] = "gpt-5.2"
+ModelRegistry._aliases["chatgpt 5.2"] = "gpt-5.2"
+ModelRegistry._aliases["chatgpt 5-2"] = "gpt-5.2"
+# Support dashed GPT-5.2 identifiers used in some clients
+ModelRegistry._aliases["gpt-5-2"] = "gpt-5.2"
+ModelRegistry._aliases["gpt-5-2-instant"] = "gpt-5.2-instant"
+ModelRegistry._aliases["gpt-5-2-thinking"] = "gpt-5.2-thinking"
+# Friendly Gemini 3 mapping
+ModelRegistry._aliases["gemini-3"] = "gemini-3-pro"
+ModelRegistry._aliases["Gemini 3"] = "gemini-3-pro"
+ModelRegistry._aliases["gemini 3"] = "gemini-3-pro"
+ModelRegistry._aliases["Gemini 3 Pro"] = "gemini-3-pro"
+ModelRegistry._aliases["gemini 3 pro"] = "gemini-3-pro"
 
 # Fill the convert dictionary
 ModelUtils.convert = ModelRegistry.all_models()

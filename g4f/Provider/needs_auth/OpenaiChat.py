@@ -121,6 +121,17 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
     _headers: dict = None
     _cookies: Cookies = None
     _expires: int = None
+    _conversation_cache: dict = {}
+    _last_conversation: Conversation | None = None
+
+    @classmethod
+    def _get_conversation_key(cls, auth_result: AuthResult):
+        cookies = getattr(auth_result, "cookies", None) or cls._cookies or {}
+        api_key = getattr(auth_result, "api_key", None) or cls._api_key
+        key = cookies.get("oai-did") or api_key
+        if isinstance(key, str):
+            key = key.strip()
+        return key
 
     @classmethod
     async def on_auth_async(cls, proxy: str = None, **kwargs) -> AsyncIterator:
@@ -429,16 +440,23 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
             if model in cls.image_models:
                 image_model = True
                 model = cls.default_model
+            cookies = getattr(auth_result, "cookies", None) or cls._cookies or {}
+            conversation_key = cls._get_conversation_key(auth_result)
+            if conversation is None and conversation_key:
+                conversation = cls._conversation_cache.get(conversation_key)
+            if conversation is None and cls._last_conversation is not None:
+                conversation = cls._last_conversation
+
             if conversation is None:
-                conversation = Conversation(None, str(uuid.uuid4()), getattr(auth_result, "cookies", {}).get("oai-did"))
+                conversation = Conversation(None, str(uuid.uuid4()), cookies.get("oai-did"))
             else:
                 conversation = copy(conversation)
 
             if conversation_mode is None:
                 conversation_mode = {"kind": "primary_assistant"}
 
-            if getattr(auth_result, "cookies", {}).get("oai-did") != getattr(conversation, "user_id", None):
-                conversation = Conversation(None, str(uuid.uuid4()))
+            if cookies.get("oai-did") and cookies.get("oai-did") != getattr(conversation, "user_id", None):
+                conversation = Conversation(None, str(uuid.uuid4()), cookies.get("oai-did"))
             if cls._api_key is None:
                 auto_continue = False
             conversation.finish_reason = None
@@ -715,6 +733,11 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
             # if kwargs.get("wait_media"):
             #     async for _m in cls.wait_media(session, conversation, headers, auth_result):
             #         yield _m
+
+            if conversation_key:
+                cls._conversation_cache[conversation_key] = conversation
+            else:
+                cls._last_conversation = conversation
 
             yield FinishReason(conversation.finish_reason)
 
