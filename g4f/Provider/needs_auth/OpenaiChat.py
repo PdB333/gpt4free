@@ -446,8 +446,13 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                 model = cls.default_model
             cookies = getattr(auth_result, "cookies", None) or cls._cookies or {}
             conversation_key = cls._get_conversation_key(auth_result, conversation_id)
+            base_conversation_key = cls._get_conversation_key(auth_result)
             if conversation is None and conversation_key:
                 conversation = cls._conversation_cache.get(conversation_key)
+            if conversation is None and conversation_id is not None and base_conversation_key:
+                # Backward compatibility: reuse the last cached conversation for this user
+                # when older chats didn't set a conversation_id
+                conversation = cls._conversation_cache.get(base_conversation_key)
             if conversation_id is not None and conversation is not None and conversation.conversation_id != conversation_id:
                 conversation = None
             if conversation is None and cls._last_conversation is not None and conversation_id is None:
