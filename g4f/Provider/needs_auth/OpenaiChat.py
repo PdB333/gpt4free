@@ -457,7 +457,8 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                 if getattr(conversation, "client_conversation_id", None) is None:
                     conversation.client_conversation_id = conversation_id
                 elif conversation.client_conversation_id != conversation_id:
-                    conversation = None
+                    conversation = copy(conversation)
+                    conversation.client_conversation_id = conversation_id
             if conversation is None and cls._last_conversation is not None and conversation_id is None:
                 conversation = cls._last_conversation
 
