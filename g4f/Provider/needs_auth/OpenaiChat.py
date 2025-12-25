@@ -453,13 +453,21 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                 # Backward compatibility: reuse the last cached conversation for this user
                 # when older chats didn't set a conversation_id
                 conversation = cls._conversation_cache.get(base_conversation_key)
-            if conversation_id is not None and conversation is not None and conversation.conversation_id != conversation_id:
-                conversation = None
+            if conversation is not None and conversation_id is not None:
+                if getattr(conversation, "client_conversation_id", None) is None:
+                    conversation.client_conversation_id = conversation_id
+                elif conversation.client_conversation_id != conversation_id:
+                    conversation = None
             if conversation is None and cls._last_conversation is not None and conversation_id is None:
                 conversation = cls._last_conversation
 
             if conversation is None:
-                conversation = Conversation(conversation_id, str(uuid.uuid4()), cookies.get("oai-did"))
+                conversation = Conversation(
+                    conversation_id,
+                    str(uuid.uuid4()),
+                    cookies.get("oai-did"),
+                    client_conversation_id=conversation_id,
+                )
             else:
                 conversation = copy(conversation)
 
@@ -749,6 +757,9 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
             #     async for _m in cls.wait_media(session, conversation, headers, auth_result):
             #         yield _m
 
+            conversation_key = cls._get_conversation_key(
+                auth_result, getattr(conversation, "client_conversation_id", None) or conversation_id
+            )
             if conversation_key:
                 cls._conversation_cache[conversation_key] = conversation
             else:
@@ -1228,8 +1239,10 @@ class Conversation(JsonConversation):
     """
 
     def __init__(self, conversation_id: str = None, message_id: str = None, user_id: str = None,
-                 finish_reason: str = None, parent_message_id: str = None, is_thinking: bool = False):
+                 finish_reason: str = None, parent_message_id: str = None, is_thinking: bool = False,
+                 client_conversation_id: str | None = None):
         self.conversation_id = conversation_id
+        self.client_conversation_id = client_conversation_id
         self.message_id = message_id
         self.finish_reason = finish_reason
         self.recipient = "all"
