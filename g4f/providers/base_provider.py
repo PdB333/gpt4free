@@ -352,9 +352,12 @@ class AsyncGeneratorProvider(AbstractProvider):
         if "stream_timeout" in kwargs or "timeout" in kwargs:
             while True:
                 try:
+                    timeout = kwargs.get("stream_timeout") if cls.use_stream_timeout else kwargs.get("timeout")
+                    if not timeout or timeout < 600:
+                        timeout = 600
                     yield await asyncio.wait_for(
                         response.__anext__(),
-                        timeout=kwargs.get("stream_timeout") if cls.use_stream_timeout else kwargs.get("timeout")
+                        timeout=timeout
                     )
                 except StopAsyncIteration:
                     break

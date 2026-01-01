@@ -419,27 +419,9 @@ model_map = {
   },
   "gemini-3-reasoning": {
     "Gemini": "gemini-3-reasoning",
-    "GeminiPro": "gemini-3-reasoning",
-    "GeminiCLI": "gemini-3-reasoning",
-    "DeepInfra": "google/gemini-3-reasoning",
-    "LMArena": "gemini-3-reasoning",
-    "PuterJS": "openrouter:google/gemini-3-reasoning",
-    "ApiAirforce": "gemini-3-reasoning",
-    "GithubCopilot": "gemini-3-reasoning",
-    "OpenRouter": "google/gemini-3-reasoning",
-    "Yupp": "gemini-3-reasoning"
   },
   "gemini-3-pro": {
-    "Gemini": "gemini-3-pro",
-    "GeminiPro": "gemini-3-pro",
-    "GeminiCLI": "gemini-3-pro",
-    "DeepInfra": "google/gemini-3-pro",
-    "LMArena": "gemini-3-pro",
-    "PuterJS": "openrouter:google/gemini-3-pro",
-    "ApiAirforce": "gemini-3-pro",
-    "GithubCopilot": "gemini-3-pro",
-    "OpenRouter": "google/gemini-3-pro",
-    "Yupp": "gemini-3-pro"
+    "Gemini": "gemini-3-pro"
   },
   "codegemma-7b": {
     "DeepInfra": "google/codegemma-7b-it",
@@ -939,18 +921,12 @@ model_map = {
   },
   "gpt-5.2": {
     "OpenaiChat": "gpt-5-2",
-    "PuterJS": "openrouter:openai/gpt-5.2",
-    "OpenRouter": "openai/gpt-5.2"
   },
   "gpt-5.2-instant": {
     "OpenaiChat": "gpt-5-2-instant",
-    "PuterJS": "openrouter:openai/gpt-5.2-instant",
-    "OpenRouter": "openai/gpt-5.2-instant"
   },
   "gpt-5.2-thinking": {
     "OpenaiChat": "gpt-5-2-thinking",
-    "PuterJS": "openrouter:openai/gpt-5.2-thinking",
-    "OpenRouter": "openai/gpt-5.2-thinking"
   },
   "gpt-5": {
     "OpenaiChat": "gpt-5",
