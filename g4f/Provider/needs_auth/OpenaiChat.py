@@ -449,28 +449,24 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
             base_conversation_key = cls._get_conversation_key(auth_result)
             if conversation is None and conversation_key:
                 conversation = cls._conversation_cache.get(conversation_key)
-            if conversation is None and conversation_id is not None and base_conversation_key:
-                # Backward compatibility: reuse the last cached conversation for this user
-                # when older chats didn't set a conversation_id
-                conversation = cls._conversation_cache.get(base_conversation_key)
-            if conversation is not None and conversation_id is not None:
-                if getattr(conversation, "client_conversation_id", None) is None:
-                    conversation.client_conversation_id = conversation_id
-                elif conversation.client_conversation_id != conversation_id:
-                    conversation = copy(conversation)
-                    conversation.client_conversation_id = conversation_id
+
+            if conversation is not None and conversation_id is None:
+                last_assistant_msg = next((m["content"] for m in reversed(messages) if m["role"] == "assistant"), None)
+                if last_assistant_msg:
+                    cached_response = getattr(conversation, "response_text", "")
+                    if not cached_response or to_string(last_assistant_msg).strip() not in cached_response:
+                        conversation = None
+                else:
+                    conversation = None
+
             if conversation is None and cls._last_conversation is not None and conversation_id is None:
                 conversation = cls._last_conversation
 
             if conversation is None:
-                conversation = Conversation(
-                    conversation_id,
-                    str(uuid.uuid4()),
-                    cookies.get("oai-did"),
-                    client_conversation_id=conversation_id,
-                )
+                conversation = Conversation(None, str(uuid.uuid4()), cookies.get("oai-did"))
             else:
                 conversation = copy(conversation)
+            conversation.response_text = ""
 
             if conversation_mode is None:
                 conversation_mode = {"kind": "primary_assistant"}
@@ -497,7 +493,7 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                             "picture_v2"
                         ] if image_model else [],
                         "thinking_effort": "extended" if reasoning_effort == "high" else "standard",
-                        "supports_buffering": True,
+                        "supports_buffering": False,
                         "supported_encodings": ["v1"]
                     }
                     if temporary:
@@ -558,7 +554,7 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                     "enable_message_followups": True,
                     "system_hints": ["search"] if web_search else None,
                     "thinking_effort": "extended" if reasoning_effort == "high" else "standard",
-                    "supports_buffering": True,
+                    "supports_buffering": False,
                     "supported_encodings": ["v1"],
                     "client_contextual_info": {"is_dark_mode": False, "time_since_loaded": random.randint(20, 500),
                                                "page_height": 578, "page_width": 1850, "pixel_ratio": 1,
@@ -719,6 +715,7 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                                             continue
 
                                     yield buffer
+                                    conversation.response_text += buffer
                                     buffer = ""
                                 else:
                                     yield chunk
@@ -729,6 +726,7 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                         break
                     if buffer:
                         yield buffer
+                        conversation.response_text += buffer
                 if sources.list:
                     yield sources
                 if conversation.generated_images:
@@ -758,9 +756,6 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
             #     async for _m in cls.wait_media(session, conversation, headers, auth_result):
             #         yield _m
 
-            conversation_key = cls._get_conversation_key(
-                auth_result, getattr(conversation, "client_conversation_id", None) or conversation_id
-            )
             if conversation_key:
                 cls._conversation_cache[conversation_key] = conversation
             else:
@@ -1240,10 +1235,8 @@ class Conversation(JsonConversation):
     """
 
     def __init__(self, conversation_id: str = None, message_id: str = None, user_id: str = None,
-                 finish_reason: str = None, parent_message_id: str = None, is_thinking: bool = False,
-                 client_conversation_id: str | None = None):
+                 finish_reason: str = None, parent_message_id: str = None, is_thinking: bool = False):
         self.conversation_id = conversation_id
-        self.client_conversation_id = client_conversation_id
         self.message_id = message_id
         self.finish_reason = finish_reason
         self.recipient = "all"
@@ -1255,6 +1248,7 @@ class Conversation(JsonConversation):
         self.prompt = None
         self.generated_images: ImagePreview = None
         self.task: dict = None
+        self.response_text = ""
 
 
 def get_cookies(
