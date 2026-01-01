@@ -308,19 +308,19 @@ gpt_5_thinking = Model(
 gpt_5_2 = Model(
     name          = 'gpt-5.2',
     base_provider = 'OpenAI',
-    best_provider = IterListProvider([OpenaiChat, OpenRouter, PuterJS])
+    best_provider = OpenaiChat
 )
 
 gpt_5_2_instant = Model(
     name          = 'gpt-5.2-instant',
     base_provider = 'OpenAI',
-    best_provider = IterListProvider([OpenaiChat, OpenRouter, PuterJS])
+    best_provider = OpenaiChat
 )
 
 gpt_5_2_thinking = Model(
     name          = 'gpt-5.2-thinking',
     base_provider = 'OpenAI',
-    best_provider = IterListProvider([OpenaiChat, OpenRouter, PuterJS])
+    best_provider = OpenaiChat
 )
 
 gpt_oss_120b = Model(
@@ -567,25 +567,13 @@ gemini_3_pro_preview = Model(
 gemini_3_reasoning = Model(
     name          = 'gemini-3-reasoning',
     base_provider = 'Google',
-    best_provider = IterListProvider([Gemini, GeminiPro, GeminiCLI])
+    best_provider = Gemini
 )
 
 gemini_3_pro = Model(
     name          = 'gemini-3-pro',
     base_provider = 'Google',
-    best_provider = IterListProvider([Gemini, GeminiPro, GeminiCLI])
-)
-
-gemini_3_reasoning = Model(
-    name          = 'gemini-3-reasoning',
-    base_provider = 'Google',
-    best_provider = GeminiCLI
-)
-
-gemini_3_pro = Model(
-    name          = 'gemini-3-pro',
-    base_provider = 'Google',
-    best_provider = GeminiCLI
+    best_provider = Gemini
 )
 
 # codegemma
