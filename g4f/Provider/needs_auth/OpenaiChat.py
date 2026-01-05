@@ -391,7 +391,7 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
             RuntimeError: If an error occurs during processing.
         """
         if temporary is None:
-            temporary = action is not None and conversation_id is None
+            temporary = False
         if action is None:
             action = "next"
         async with StreamSession(
