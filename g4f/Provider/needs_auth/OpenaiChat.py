@@ -39,6 +39,7 @@ from ..openai.har_file import RequestConfig, arkReq, arkose_url, start_url, conv
     backend_anon_url
 from ..openai.proofofwork import generate_proof_token
 from ..openai.new import get_requirements_token, get_config
+from ...cookies import get_cookies_dir
 from ... import debug
 
 DEFAULT_HEADERS = {
@@ -49,6 +50,7 @@ DEFAULT_HEADERS = {
     "sec-ch-ua": "\"Google Chrome\";v=\"131\", \"Chromium\";v=\"131\", \"Not_A Brand\";v=\"24\"",
     "sec-ch-ua-mobile": "?0",
     "sec-ch-ua-platform": "\"Windows\"",
+    "sec-ch-ua-platform": "\"macOS\"",
     "sec-fetch-dest": "empty",
     "sec-fetch-mode": "cors",
     "sec-fetch-site": "same-origin",
@@ -68,6 +70,7 @@ INIT_HEADERS = {
     'sec-ch-ua-mobile': '?0',
     'sec-ch-ua-model': '""',
     "sec-ch-ua-platform": "\"Windows\"",
+    "sec-ch-ua-platform": "\"macOS\"",
     'sec-ch-ua-platform-version': '"14.4.0"',
     'sec-fetch-dest': 'document',
     'sec-fetch-mode': 'navigate',
@@ -93,6 +96,7 @@ UPLOAD_HEADERS = {
     "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 }
 
+
 ImagesCache: Dict[str, dict] = {}
 
 
@@ -104,11 +108,14 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
     working = True
     active_by_default = True
     use_nodriver = True
+    # Image uploads can take longer than the default stream timeout, so rely on the
+    # longer provider timeout instead of the short streaming deadline.
+    use_stream_timeout = False
     image_cache = True
-    supports_gpt_4 = True
+    supports_gpt_4 = False
     supports_message_history = True
     supports_system_message = True
-    default_model = default_model
+    default_model = "gpt-5.2"
     default_image_model = default_image_model
     image_models = image_models
     vision_models = text_models
@@ -121,6 +128,18 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
     _headers: dict = None
     _cookies: Cookies = None
     _expires: int = None
+    _conversation_cache: dict = {}
+    _last_conversation: Conversation | None = None
+
+    @classmethod
+    def _get_conversation_key(cls, auth_result: AuthResult, conversation_id: str | None = None):
+        cookies = getattr(auth_result, "cookies", None) or cls._cookies or {}
+        api_key = getattr(auth_result, "api_key", None) or cls._api_key
+        base_key = cookies.get("oai-did") or api_key
+        key = (conversation_id, base_key) if conversation_id is not None else base_key
+        if isinstance(key, str):
+            key = key.strip()
+        return key
 
     @classmethod
     async def on_auth_async(cls, proxy: str = None, **kwargs) -> AsyncIterator:
@@ -144,17 +163,24 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
     ) -> List[ImageRequest]:
         """
         Upload an image to the service and get the download URL
-        
+
         Args:
             session: The StreamSession object to use for requests
             headers: The headers to include in the requests
             media: The files to upload, either a PIL Image object or a bytes object
-        
+
         Returns:
             An ImageRequest object that contains the download URL, file name, and other data
         """
 
         async def upload_file(file, image_name=None) -> ImageRequest:
+            headers = auth_result.headers.copy() if getattr(auth_result, "headers", None) else (cls._headers.copy() if cls._headers else {})
+
+            if auth_result.cookies:
+                headers["cookie"] = format_cookies(auth_result.cookies)
+            if auth_result.api_key:
+                headers["authorization"] = f"Bearer {auth_result.api_key}"
+
             debug.log(f"Uploading file: {image_name}")
             file_data = {}
 
@@ -186,7 +212,7 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                 "use_case": use_case,
             }
             # Post the image data to the service and get the image data
-            async with session.post(f"{cls.url}/backend-api/files", json=data, headers=cls._headers) as response:
+            async with session.post(f"{cls.url}/backend-api/files", json=data, headers=headers) as response:
                 cls._update_request_args(auth_result, session)
                 await raise_for_status(response, "Create file failed")
                 file_data.update(
@@ -197,6 +223,9 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                         "extension": extension,
                     }
                 )
+            if auth_result.cookies:
+                headers["cookie"] = format_cookies(auth_result.cookies)
+
             # Put the image bytes to the upload URL and check the status
             await asyncio.sleep(1)
             async with session.put(
@@ -208,6 +237,7 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                         "x-ms-blob-type": "BlockBlob",
                         "x-ms-version": "2020-04-08",
                         "Origin": "https://chatgpt.com",
+                        "User-Agent": headers.get("user-agent", UPLOAD_HEADERS["user-agent"])
                     }
             ) as response:
                 await raise_for_status(response)
@@ -215,7 +245,7 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
             async with session.post(
                     f"{cls.url}/backend-api/files/{file_data['file_id']}/uploaded",
                     json={},
-                    headers=auth_result.headers
+                    headers=headers
             ) as response:
                 cls._update_request_args(auth_result, session)
                 await raise_for_status(response, "Get download url failed")
@@ -235,11 +265,11 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
     def create_messages(cls, messages: Messages, image_requests: ImageRequest = None, system_hints: list = None):
         """
         Create a list of messages for the user input
-        
+
         Args:
             prompt: The user input as a string
             image_response: The image response object, if any
-        
+
         Returns:
             A list of messages with the user input and the image, if any
         """
@@ -401,26 +431,33 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
         ) as session:
             image_requests = None
             media = merge_media(media, messages)
+            debug.log(f"OpenaiChat: Starting create_authed. needs_auth={cls.needs_auth}, has_media={bool(media)}")
             if not cls.needs_auth and not media:
+                debug.log("OpenaiChat: Proceeding without auth (anonymous)")
                 if cls._headers is None:
                     cls._create_request_args(cls._cookies)
                     async with session.get(cls.url, headers=INIT_HEADERS) as response:
                         cls._update_request_args(auth_result, session)
                         await raise_for_status(response)
             else:
+                debug.log("OpenaiChat: Proceeding with auth")
                 if cls._headers is None and getattr(auth_result, "cookies", None):
                     cls._create_request_args(auth_result.cookies, auth_result.headers)
-                if not cls._set_api_key(getattr(auth_result, "api_key", None)):
+                api_key = getattr(auth_result, "api_key", None)
+                debug.log(f"OpenaiChat: Using API key: {api_key[:10] if api_key else 'None'}...")
+                if not cls._set_api_key(api_key):
+                    debug.log("OpenaiChat: API key validation failed")
                     raise MissingAuthError("Access token is not valid")
+                debug.log("OpenaiChat: API key validation success")
                 async with session.get(cls.url, headers=cls._headers) as response:
                     cls._update_request_args(auth_result, session)
                     await raise_for_status(response)
 
-                # try:
-                image_requests = await cls.upload_files(session, auth_result, media)
-                # except Exception as e:
-                #     debug.error("OpenaiChat: Upload image failed")
-                #     debug.error(e)
+                try:
+                    image_requests = await cls.upload_files(session, auth_result, media)
+                except Exception as e:
+                    debug.error("OpenaiChat: Upload image failed")
+                    debug.error(e)
             try:
                 model = cls.get_model(model)
             except ModelNotFoundError:
@@ -429,16 +466,35 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
             if model in cls.image_models:
                 image_model = True
                 model = cls.default_model
+            cookies = getattr(auth_result, "cookies", None) or cls._cookies or {}
+            conversation_key = cls._get_conversation_key(auth_result, conversation_id)
+            base_conversation_key = cls._get_conversation_key(auth_result)
+            if conversation is None and conversation_key:
+                conversation = cls._conversation_cache.get(conversation_key)
+
+            # if conversation is not None and conversation_id is None:
+            #     last_assistant_msg = next((m["content"] for m in reversed(messages) if m["role"] == "assistant"), None)
+            #     if last_assistant_msg:
+            #         cached_response = getattr(conversation, "response_text", "")
+            #         if not cached_response or to_string(last_assistant_msg).strip() not in cached_response:
+            #             conversation = None
+            #     else:
+            #         conversation = None
+
+            if conversation is None and cls._last_conversation is not None and conversation_id is None:
+                conversation = cls._last_conversation
+
             if conversation is None:
-                conversation = Conversation(None, str(uuid.uuid4()), getattr(auth_result, "cookies", {}).get("oai-did"))
+                conversation = Conversation(conversation_id, str(uuid.uuid4()), cookies.get("oai-did"))
             else:
                 conversation = copy(conversation)
+            conversation.response_text = ""
 
             if conversation_mode is None:
                 conversation_mode = {"kind": "primary_assistant"}
 
-            if getattr(auth_result, "cookies", {}).get("oai-did") != getattr(conversation, "user_id", None):
-                conversation = Conversation(None, str(uuid.uuid4()))
+            if cookies.get("oai-did") and cookies.get("oai-did") != getattr(conversation, "user_id", None):
+                conversation = Conversation(None, str(uuid.uuid4()), cookies.get("oai-did"))
             if cls._api_key is None:
                 auto_continue = False
             conversation.finish_reason = None
@@ -459,7 +515,7 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                             "picture_v2"
                         ] if image_model else [],
                         "thinking_effort": "extended" if reasoning_effort == "high" else "standard",
-                        "supports_buffering": True,
+                        "supports_buffering": False,
                         "supported_encodings": ["v1"]
                     }
                     if temporary:
@@ -471,10 +527,12 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                     ) as response:
                         await raise_for_status(response)
                         conduit_token = (await response.json())["conduit_token"]
+                req_url = f"{cls.url}/backend-anon/sentinel/chat-requirements"
+                if cls._api_key is not None:
+                    req_url = f"{cls.url}/backend-api/sentinel/chat-requirements"
+                debug.log(f"OpenaiChat: Requirements URL: {req_url}")
                 async with session.post(
-                        f"{cls.url}/backend-anon/sentinel/chat-requirements"
-                        if cls._api_key is None else
-                        f"{cls.url}/backend-api/sentinel/chat-requirements",
+                        req_url,
                         json={"p": None if not getattr(auth_result, "proof_token", None) else get_requirements_token(
                             getattr(auth_result, "proof_token", None))},
                         headers=cls._headers
@@ -520,15 +578,15 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                     "enable_message_followups": True,
                     "system_hints": ["search"] if web_search else None,
                     "thinking_effort": "extended" if reasoning_effort == "high" else "standard",
-                    "supports_buffering": True,
+                    "supports_buffering": False,
                     "supported_encodings": ["v1"],
                     "client_contextual_info": {"is_dark_mode": False, "time_since_loaded": random.randint(20, 500),
                                                "page_height": 578, "page_width": 1850, "pixel_ratio": 1,
                                                "screen_height": 1080, "screen_width": 1920},
                     "paragen_cot_summary_display_override": "allow"
                 }
-                if temporary:
-                    data["history_and_training_disabled"] = True
+                # if temporary:
+                #     data["history_and_training_disabled"] = True
 
                 if conversation.conversation_id is not None and not temporary:
                     data["conversation_id"] = conversation.conversation_id
@@ -561,10 +619,12 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                     headers["openai-sentinel-proof-token"] = proofofwork
                 if need_turnstile and getattr(auth_result, "turnstile_token", None) is not None:
                     headers['openai-sentinel-turnstile-token'] = auth_result.turnstile_token
+                post_url = backend_anon_url
+                if cls._api_key is not None:
+                    post_url = backend_url
+                debug.log(f"OpenaiChat: Chat URL: {post_url}")
                 async with session.post(
-                        backend_anon_url
-                        if cls._api_key is None else
-                        backend_url,
+                        post_url,
                         json=data,
                         headers=headers
                 ) as response:
@@ -576,117 +636,123 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                     await raise_for_status(response)
                     buffer = u""
                     matches = []
-                    async for line in response.iter_lines():
-                        pattern = re.compile(r"file-service://[\w-]+")
-                        for match in pattern.finditer(line.decode(errors="ignore")):
-                            if match.group(0) in matches:
-                                continue
-                            matches.append(match.group(0))
-                            generated_image = await cls.get_generated_image(session, auth_result, match.group(0),
-                                                                            prompt)
-                            if generated_image is not None:
-                                yield generated_image
-                        async for chunk in cls.iter_messages_line(session, auth_result, line, conversation, sources,
-                                                                  references):
-                            if isinstance(chunk, str):
-                                chunk = chunk.replace("\ue203", "").replace("\ue204", "").replace("\ue206", "")
-                                buffer += chunk
-                                if buffer.find(u"\ue200") != -1:
-                                    if buffer.find(u"\ue201") != -1:
-                                        def sequence_replacer(match):
-                                            def citation_replacer(match: re.Match[str]):
-                                                ref_type = match.group(1)
-                                                ref_index = int(match.group(2))
-                                                if ((ref_type == "image" and is_image_embedding) or
-                                                        is_video_embedding or
-                                                        ref_type == "forecast"):
+                    try:
+                        async for line in response.iter_lines():
+                            pattern = re.compile(r"file-service://[\w-]+")
+                            for match in pattern.finditer(line.decode(errors="ignore")):
+                                if match.group(0) in matches:
+                                    continue
+                                matches.append(match.group(0))
+                                generated_image = await cls.get_generated_image(session, auth_result, match.group(0),
+                                                                                prompt)
+                                if generated_image is not None:
+                                    yield generated_image
+                            async for chunk in cls.iter_messages_line(session, auth_result, line, conversation, sources,
+                                                                      references):
+                                if isinstance(chunk, str):
+                                    chunk = chunk.replace("\ue203", "").replace("\ue204", "").replace("\ue206", "")
+                                    buffer += chunk
+                                    if buffer.find(u"\ue200") != -1:
+                                        if buffer.find(u"\ue201") != -1:
+                                            def sequence_replacer(match):
+                                                def citation_replacer(match: re.Match[str]):
+                                                    ref_type = match.group(1)
+                                                    ref_index = int(match.group(2))
+                                                    if ((ref_type == "image" and is_image_embedding) or
+                                                            is_video_embedding or
+                                                            ref_type == "forecast"):
 
-                                                    reference = references.get_reference({
+                                                        reference = references.get_reference({
+                                                            "ref_index": ref_index,
+                                                            "ref_type": ref_type
+                                                        })
+                                                        if not reference:
+                                                            return ""
+
+                                                        if ref_type == "forecast":
+                                                            if reference.get("alt"):
+                                                                return reference.get("alt")
+                                                            if reference.get("prompt_text"):
+                                                                return reference.get("prompt_text")
+
+                                                        if is_image_embedding and reference.get("content_url", ""):
+                                                            return f"![{reference.get('title', '')}]({reference.get('content_url')})"
+
+                                                        if is_video_embedding:
+                                                            if reference.get("url", "") and reference.get("thumbnail_url",
+                                                                                                              ""):
+                                                                return f"[![{reference.get('title', '')}]({reference['thumbnail_url']})]({reference['url']})"
+                                                            video_match = re.match(r"video\n(.*?)\nturn[0-9]+",
+                                                                                   match.group(0))
+                                                            if video_match:
+                                                                return video_match.group(1)
+                                                        return ""
+
+                                                    source_index = sources.get_index({
                                                         "ref_index": ref_index,
                                                         "ref_type": ref_type
                                                     })
-                                                    if not reference:
+                                                    if source_index is not None and len(sources.list) > source_index:
+                                                        link = sources.list[source_index]["url"]
+                                                        return f"[[{source_index + 1}]]({link})"
+                                                    return f""
+
+                                                def products_replacer(match: re.Match[str]):
+                                                    try:
+                                                        products_data = json.loads(match.group(1))
+                                                        products_str = ""
+                                                        for idx, _ in enumerate(products_data.get("selections", []) or []):
+                                                            name = products_data.get('selections', [])[idx][1]
+                                                            tags = products_data.get('tags', [])[idx]
+                                                            products_str += f"{name} - {tags}\n\n"
+
+                                                        return products_str
+                                                    except:
                                                         return ""
 
-                                                    if ref_type == "forecast":
-                                                        if reference.get("alt"):
-                                                            return reference.get("alt")
-                                                        if reference.get("prompt_text"):
-                                                            return reference.get("prompt_text")
+                                                sequence_content = match.group(1)
+                                                sequence_content = sequence_content.replace("\ue200", "").replace("\ue202",
+                                                                                                                  "\n").replace(
+                                                    "\ue201", "")
+                                                sequence_content = sequence_content.replace("navlist\n", "#### ")
 
-                                                    if is_image_embedding and reference.get("content_url", ""):
-                                                        return f"![{reference.get('title', '')}]({reference.get('content_url')})"
+                                                # Handle search, news, view and image citations
+                                                is_image_embedding = sequence_content.startswith("i\nturn")
+                                                is_video_embedding = sequence_content.startswith("video\n")
+                                                sequence_content = re.sub(
+                                                    r'(?:cite\nturn[0-9]+|forecast\nturn[0-9]+|video\n.*?\nturn[0-9]+|i?\n?turn[0-9]+)(search|news|view|image|forecast)(\d+)',
+                                                    citation_replacer,
+                                                    sequence_content
+                                                )
+                                                sequence_content = re.sub(r'products\n(.*)', products_replacer,
+                                                                          sequence_content)
+                                                sequence_content = re.sub(r'product_entity\n\[".*","(.*)"\]',
+                                                                          lambda x: x.group(1), sequence_content)
+                                                return sequence_content
 
-                                                    if is_video_embedding:
-                                                        if reference.get("url", "") and reference.get("thumbnail_url",
-                                                                                                      ""):
-                                                            return f"[![{reference.get('title', '')}]({reference['thumbnail_url']})]({reference['url']})"
-                                                        video_match = re.match(r"video\n(.*?)\nturn[0-9]+",
-                                                                               match.group(0))
-                                                        if video_match:
-                                                            return video_match.group(1)
-                                                    return ""
+                                            # process only completed sequences and do not touch start of next not completed sequence
+                                            buffer = re.sub(r'\ue200(.*?)\ue201', sequence_replacer, buffer,
+                                                            flags=re.DOTALL)
 
-                                                source_index = sources.get_index({
-                                                    "ref_index": ref_index,
-                                                    "ref_type": ref_type
-                                                })
-                                                if source_index is not None and len(sources.list) > source_index:
-                                                    link = sources.list[source_index]["url"]
-                                                    return f"[[{source_index + 1}]]({link})"
-                                                return f""
-
-                                            def products_replacer(match: re.Match[str]):
-                                                try:
-                                                    products_data = json.loads(match.group(1))
-                                                    products_str = ""
-                                                    for idx, _ in enumerate(products_data.get("selections", []) or []):
-                                                        name = products_data.get('selections', [])[idx][1]
-                                                        tags = products_data.get('tags', [])[idx]
-                                                        products_str += f"{name} - {tags}\n\n"
-
-                                                    return products_str
-                                                except:
-                                                    return ""
-
-                                            sequence_content = match.group(1)
-                                            sequence_content = sequence_content.replace("\ue200", "").replace("\ue202",
-                                                                                                              "\n").replace(
-                                                "\ue201", "")
-                                            sequence_content = sequence_content.replace("navlist\n", "#### ")
-
-                                            # Handle search, news, view and image citations
-                                            is_image_embedding = sequence_content.startswith("i\nturn")
-                                            is_video_embedding = sequence_content.startswith("video\n")
-                                            sequence_content = re.sub(
-                                                r'(?:cite\nturn[0-9]+|forecast\nturn[0-9]+|video\n.*?\nturn[0-9]+|i?\n?turn[0-9]+)(search|news|view|image|forecast)(\d+)',
-                                                citation_replacer,
-                                                sequence_content
-                                            )
-                                            sequence_content = re.sub(r'products\n(.*)', products_replacer,
-                                                                      sequence_content)
-                                            sequence_content = re.sub(r'product_entity\n\[".*","(.*)"\]',
-                                                                      lambda x: x.group(1), sequence_content)
-                                            return sequence_content
-
-                                        # process only completed sequences and do not touch start of next not completed sequence
-                                        buffer = re.sub(r'\ue200(.*?)\ue201', sequence_replacer, buffer,
-                                                        flags=re.DOTALL)
-
-                                        if buffer.find(u"\ue200") != -1:  # still have uncompleted sequence
+                                            if buffer.find(u"\ue200") != -1:  # still have uncompleted sequence
+                                                continue
+                                        else:
+                                            # do not yield to consume rest part of special sequence
                                             continue
-                                    else:
-                                        # do not yield to consume rest part of special sequence
-                                        continue
 
-                                yield buffer
-                                buffer = ""
-                            else:
-                                yield chunk
-                        if conversation.finish_reason is not None:
-                            break
+                                    yield buffer
+                                    conversation.response_text += buffer
+                                    buffer = ""
+                                else:
+                                    yield chunk
+                            if conversation.finish_reason is not None:
+                                break
+                    except asyncio.CancelledError:
+                        conversation.finish_reason = conversation.finish_reason or "cancelled"
+                        break
                     if buffer:
                         yield buffer
+                        conversation.response_text += buffer
                 if sources.list:
                     yield sources
                 if conversation.generated_images:
@@ -715,6 +781,11 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
             # if kwargs.get("wait_media"):
             #     async for _m in cls.wait_media(session, conversation, headers, auth_result):
             #         yield _m
+
+            if conversation_key:
+                cls._conversation_cache[conversation_key] = conversation
+            else:
+                cls._last_conversation = conversation
 
             yield FinishReason(conversation.finish_reason)
 
@@ -1043,19 +1114,37 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
             cls.request_config.proof_token = proof_token
         if cookies is not None:
             cls.request_config.cookies = cookies
+
+        if api_key is None:
+            try:
+                auth_file = os.path.join(get_cookies_dir(), f"auth_{cls.__name__}.json")
+                if os.path.exists(auth_file):
+                    with open(auth_file, "r") as f:
+                        auth_data = json.load(f)
+                    if "api_key" in auth_data:
+                        api_key = auth_data["api_key"]
+                        debug.log(f"OpenaiChat: Loaded API key from {auth_file}")
+            except Exception as e:
+                debug.log(f"OpenaiChat: Error reading auth file: {e}")
+
         if api_key is not None:
+            debug.log("OpenaiChat: Login called with explicit API key")
             cls._create_request_args(cls.request_config.cookies, cls.request_config.headers)
             cls._set_api_key(api_key)
         else:
             try:
+                debug.log("OpenaiChat: Login called without API key, checking HAR")
                 cls.request_config = await get_request_config(cls.request_config, proxy)
                 if cls.request_config is None:
                     cls.request_config = RequestConfig()
                 cls._create_request_args(cls.request_config.cookies, cls.request_config.headers)
                 if cls.needs_auth and cls.request_config.access_token is None:
+                    debug.log("OpenaiChat: No access token found in HAR.")
                     raise NoValidHarFileError(f"Missing access token")
                 if not cls._set_api_key(cls.request_config.access_token):
+                    debug.log("OpenaiChat: Access token from HAR is invalid.")
                     raise NoValidHarFileError(f"Access token is not valid: {cls.request_config.access_token}")
+                debug.log("OpenaiChat: Login successful via HAR.")
             except NoValidHarFileError:
                 if has_nodriver:
                     if cls.request_config.access_token is None:
@@ -1166,9 +1255,13 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
     def _set_api_key(cls, api_key: str):
         cls._api_key = api_key
         if api_key:
-            exp = api_key.split(".")[1]
-            exp = (exp + "=" * (4 - len(exp) % 4)).encode()
-            cls._expires = json.loads(base64.b64decode(exp)).get("exp")
+            try:
+                exp = api_key.split(".")[1]
+                exp = (exp + "=" * (4 - len(exp) % 4)).encode()
+                cls._expires = json.loads(base64.b64decode(exp)).get("exp")
+            except Exception as e:
+                debug.log(f"OpenaiChat: Failed to parse API key: {e}")
+                return False
             debug.log(f"OpenaiChat: API key expires at\n {cls._expires} we have:\n {time.time()}")
             if time.time() > cls._expires:
                 debug.log(f"OpenaiChat: API key is expired")
@@ -1176,7 +1269,8 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
             else:
                 cls._headers["authorization"] = f"Bearer {api_key}"
                 return True
-        return True
+        debug.log("OpenaiChat: No API key provided to _set_api_key")
+        return False
 
     @classmethod
     def _update_cookie_header(cls):
@@ -1203,6 +1297,7 @@ class Conversation(JsonConversation):
         self.prompt = None
         self.generated_images: ImagePreview = None
         self.task: dict = None
+        self.response_text = ""
 
 
 def get_cookies(
