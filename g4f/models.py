@@ -28,7 +28,7 @@ from .Provider import (
     Together,
     WeWordle,
     Yqcloud,
-    
+
     ### Needs Auth ###
     Azure,
     BingCreateImages,
@@ -54,7 +54,7 @@ class ModelRegistry:
     """Simplified registry for automatic model discovery"""
     _models: Dict[str, 'Model'] = {}
     _aliases: Dict[str, str] = {}
-    
+
     @classmethod
     def register(cls, model: 'Model', aliases: List[str] = None):
         """Register a model and optional aliases"""
@@ -63,7 +63,7 @@ class ModelRegistry:
             if aliases:
                 for alias in aliases:
                     cls._aliases[alias] = model.name
-    
+
     @classmethod
     def get(cls, name: str) -> Optional['Model']:
         """Get model by name or alias"""
@@ -72,24 +72,24 @@ class ModelRegistry:
         if name in cls._aliases:
             return cls._models[cls._aliases[name]]
         return None
-    
+
     @classmethod
     def all_models(cls) -> Dict[str, 'Model']:
         """Get all registered models"""
         return cls._models.copy()
-    
+
     @classmethod
     def clear(cls):
         """Clear registry (for testing)"""
         cls._models.clear()
         cls._aliases.clear()
-    
+
     @classmethod
     def list_models_by_provider(cls, provider_name: str) -> List[str]:
         """List all models that use specific provider"""
-        return [name for name, model in cls._models.items() 
+        return [name for name, model in cls._models.items()
                 if provider_name in str(model.best_provider)]
-    
+
     @classmethod
     def validate_all_models(cls) -> Dict[str, List[str]]:
         """Validate all models and return issues"""
@@ -140,10 +140,10 @@ class ImageModel(Model):
 
 class AudioModel(Model):
     pass
-    
+
 class VideoModel(Model):
     pass
-    
+
 class VisionModel(Model):
     pass
 
@@ -282,6 +282,43 @@ gpt_4_1_nano = Model(
 
 gpt_4_5 = Model(
     name          = 'gpt-4.5',
+    base_provider = 'OpenAI',
+    best_provider = OpenaiChat
+)
+
+# gpt-5
+gpt_5 = Model(
+    name          = 'gpt-5',
+    base_provider = 'OpenAI',
+    best_provider = IterListProvider([OpenaiChat, OpenRouter, PuterJS])
+)
+
+gpt_5_instant = Model(
+    name          = 'gpt-5-instant',
+    base_provider = 'OpenAI',
+    best_provider = IterListProvider([OpenaiChat, OpenRouter, PuterJS])
+)
+
+gpt_5_thinking = Model(
+    name          = 'gpt-5-thinking',
+    base_provider = 'OpenAI',
+    best_provider = IterListProvider([OpenaiChat, OpenRouter, PuterJS])
+)
+
+gpt_5_2 = Model(
+    name          = 'gpt-5.2',
+    base_provider = 'OpenAI',
+    best_provider = OpenaiChat
+)
+
+gpt_5_2_instant = Model(
+    name          = 'gpt-5.2-instant',
+    base_provider = 'OpenAI',
+    best_provider = OpenaiChat
+)
+
+gpt_5_2_thinking = Model(
+    name          = 'gpt-5.2-thinking',
     base_provider = 'OpenAI',
     best_provider = OpenaiChat
 )
@@ -524,7 +561,19 @@ gemini_2_5_pro = Model(
 gemini_3_pro_preview = Model(
     name          = 'gemini-3-pro-preview',
     base_provider = 'Google',
-    best_provider = GeminiCLI
+    best_provider = IterListProvider([Gemini, GeminiPro, GeminiCLI])
+)
+
+gemini_3_reasoning = Model(
+    name          = 'gemini-3-reasoning',
+    base_provider = 'Google',
+    best_provider = Gemini
+)
+
+gemini_3_pro = Model(
+    name          = 'gemini-3-pro',
+    base_provider = 'Google',
+    best_provider = Gemini
 )
 
 # codegemma
@@ -660,7 +709,7 @@ qwen_2_5_72b = Model(
 qwen_2_5_coder_32b = Model(
     name = 'qwen-2.5-coder-32b',
     base_provider = 'Qwen',
-    best_provider = IterListProvider([Together, HuggingChat])
+    best_provider = IterListProvider([PollinationsAI, Together, HuggingChat])
 )
 
 qwen_2_5_1m = Model(
@@ -848,7 +897,7 @@ kimi = Model(
     long_name = "moonshotai/Kimi-K2-Instruct"
 )
 
-### Perplexity AI ### 
+### Perplexity AI ###
 sonar = Model(
     name = 'sonar',
     base_provider = 'Perplexity AI',
@@ -879,7 +928,7 @@ r1_1776 = Model(
     best_provider = IterListProvider([Together, PuterJS, Perplexity])
 )
 
-### Nvidia ### 
+### Nvidia ###
 nemotron_70b = Model(
     name = 'nemotron-70b',
     base_provider = 'Nvidia',
@@ -921,7 +970,14 @@ aria = Model(
     best_provider = OperaAria
 )
 
-### Stability AI ### 
+### Uncensored AI ###
+evil = Model(
+    name = 'evil',
+    base_provider = 'Evil Mode - Experimental',
+    best_provider = PollinationsAI
+)
+
+### Stability AI ###
 sdxl_turbo = ImageModel(
     name = 'sdxl-turbo',
     base_provider = 'Stability AI',
@@ -994,19 +1050,19 @@ class ModelUtils:
     Utility class for mapping string identifiers to Model instances.
     Now uses automatic discovery instead of manual mapping.
     """
-    
+
     convert: Dict[str, Model] = {}
-    
+
     @classmethod
     def refresh(cls):
         """Refresh the model registry and update convert"""
         cls.convert = ModelRegistry.all_models()
-    
+
     @classmethod
     def get_model(cls, name: str) -> Optional[Model]:
         """Get model by name or alias"""
         return ModelRegistry.get(name)
-    
+
     @classmethod
     def register_alias(cls, alias: str, model_name: str):
         """Register an alias for a model"""
@@ -1014,6 +1070,25 @@ class ModelUtils:
 
 # Register special aliases after all models are created
 ModelRegistry._aliases["gemini"] = "gemini-2.0"
+# Friendly ChatGPT 5.2 aliases
+ModelRegistry._aliases["chatgpt-5.2"] = "gpt-5.2"
+ModelRegistry._aliases["chatgpt-5-2"] = "gpt-5.2"
+ModelRegistry._aliases["chatgpt5.2"] = "gpt-5.2"
+ModelRegistry._aliases["chatgpt5-2"] = "gpt-5.2"
+ModelRegistry._aliases["ChatGPT 5.2"] = "gpt-5.2"
+ModelRegistry._aliases["ChatGPT 5-2"] = "gpt-5.2"
+ModelRegistry._aliases["chatgpt 5.2"] = "gpt-5.2"
+ModelRegistry._aliases["chatgpt 5-2"] = "gpt-5.2"
+# Support dashed GPT-5.2 identifiers used in some clients
+ModelRegistry._aliases["gpt-5-2"] = "gpt-5.2"
+ModelRegistry._aliases["gpt-5-2-instant"] = "gpt-5.2-instant"
+ModelRegistry._aliases["gpt-5-2-thinking"] = "gpt-5.2-thinking"
+# Friendly Gemini 3 mapping
+ModelRegistry._aliases["gemini-3"] = "gemini-3-pro"
+ModelRegistry._aliases["Gemini 3"] = "gemini-3-pro"
+ModelRegistry._aliases["gemini 3"] = "gemini-3-pro"
+ModelRegistry._aliases["Gemini 3 Pro"] = "gemini-3-pro"
+ModelRegistry._aliases["gemini 3 pro"] = "gemini-3-pro"
 
 # Fill the convert dictionary
 ModelUtils.convert = ModelRegistry.all_models()
@@ -1040,10 +1115,10 @@ def _get_working_providers(model: Model) -> List:
     """Get list of working providers for a model"""
     if model.best_provider is None:
         return []
-    
+
     if isinstance(model.best_provider, IterListProvider):
         return [p for p in model.best_provider.providers if p.working]
-    
+
     return [model.best_provider] if model.best_provider.working else []
 
 # Generate __models__ using the auto-discovered models
