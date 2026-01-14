@@ -1,1387 +1,904 @@
 from __future__ import annotations
 
-import asyncio
-import base64
-import hashlib
+import logging
 import json
+import uvicorn
+import secrets
 import os
-import random
 import re
+import shutil
 import time
-import uuid
-from copy import copy
-from typing import AsyncIterator, Iterator, Optional, Generator, Dict, Union, List, Any, AsyncGenerator, Set
-
-from ...requests.curl_cffi import AsyncSession
+from email.utils import formatdate
+import os.path
+import hashlib
+import base64
+from contextlib import asynccontextmanager
+from urllib.parse import quote_plus
+from fastapi import FastAPI, Response, Request, UploadFile, Form, Depends, Header
+from fastapi.responses import StreamingResponse, RedirectResponse, HTMLResponse, JSONResponse, FileResponse
+from fastapi.exceptions import RequestValidationError
+from fastapi.security import APIKeyHeader
+from starlette.exceptions import HTTPException
+from starlette.status import (
+    HTTP_200_OK,
+    HTTP_422_UNPROCESSABLE_ENTITY, 
+    HTTP_404_NOT_FOUND,
+    HTTP_401_UNAUTHORIZED,
+    HTTP_403_FORBIDDEN,
+    HTTP_429_TOO_MANY_REQUESTS,
+    HTTP_500_INTERNAL_SERVER_ERROR,
+)
+from starlette.staticfiles import NotModifiedResponse
+from fastapi.encoders import jsonable_encoder
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials, HTTPBasic
+from fastapi.middleware.cors import CORSMiddleware
+from starlette.responses import FileResponse
+from starlette.background import BackgroundTask
+try:
+    from a2wsgi import WSGIMiddleware
+    has_a2wsgi = True
+except ImportError:
+    has_a2wsgi = False
+try:
+    from PIL import Image 
+    has_pillow = True
+except ImportError:
+    has_pillow = False
+from types import SimpleNamespace
+from typing import Union, Optional, List
 
 try:
-    import nodriver
-
+    from typing import Annotated
+except ImportError:
+    class Annotated:
+        pass
+try:
+    from nodriver import util
     has_nodriver = True
 except ImportError:
     has_nodriver = False
 
-from ..base_provider import AsyncAuthedProvider, ProviderModelMixin
-from ...typing import AsyncResult, Messages, Cookies, MediaListType
-from ...requests.raise_for_status import raise_for_status
-from ...requests import StreamSession
-from ...requests import get_nodriver_session
-from ...image import ImageRequest, to_image, to_bytes, detect_file_type
-from ...errors import MissingAuthError, NoValidHarFileError, ModelNotFoundError
-from ...providers.response import JsonConversation, FinishReason, SynthesizeData, AuthResult, ImageResponse, \
-    ImagePreview, ResponseType, JsonRequest, format_link
-from ...providers.response import TitleGeneration, RequestLogin, Reasoning
-from ...tools.media import merge_media
-from ..helper import format_cookies, format_media_prompt, to_string
-from ..openai.models import default_model, default_image_model, models, image_models, text_models, model_aliases
-from ..openai.har_file import get_request_config
-from ..openai.har_file import RequestConfig, arkReq, arkose_url, start_url, conversation_url, backend_url, prepare_url, \
-    backend_anon_url
-from ..openai.proofofwork import generate_proof_token
-from ..openai.new import get_requirements_token, get_config
-from ... import debug
+import g4f
+import g4f.debug
+from g4f.client import AsyncClient, ChatCompletion, ImagesResponse
+from g4f.providers.response import BaseConversation, JsonConversation
+from g4f.client.helper import filter_none
+from g4f.config import DEFAULT_PORT, DEFAULT_TIMEOUT, DEFAULT_STREAM_TIMEOUT
+from g4f.image import EXTENSIONS_MAP, is_data_an_media, process_image
+from g4f.image.copy_images import get_media_dir, copy_media, get_source_url
+from g4f.errors import ProviderNotFoundError, ModelNotFoundError, MissingAuthError, NoValidHarFileError, MissingRequirementsError, RateLimitError
+from g4f.cookies import read_cookie_files, get_cookies_dir
+from g4f.providers.types import ProviderType
+from g4f.providers.response import AudioResponse
+from g4f.providers.any_provider import AnyProvider
+from g4f.providers.any_model_map import model_map, vision_models, image_models, audio_models, video_models
+from g4f import Provider
+from g4f.gui import get_gui_app
+from .stubs import (
+    ChatCompletionsConfig, ImageGenerationConfig,
+    ProviderResponseModel, ModelResponseModel,
+    ErrorResponseModel, ProviderResponseDetailModel,
+    FileResponseModel,
+    TranscriptionResponseModel, AudioSpeechConfig
+)
+from g4f import debug
 
-DEFAULT_HEADERS = {
-    "accept": "*/*",
-    "accept-encoding": "gzip, deflate, br, zstd",
-    'accept-language': 'en-US,en;q=0.8',
-    "referer": "https://chatgpt.com/",
-    "sec-ch-ua": "\"Google Chrome\";v=\"131\", \"Chromium\";v=\"131\", \"Not_A Brand\";v=\"24\"",
-    "sec-ch-ua-mobile": "?0",
-    "sec-ch-ua-platform": "\"Windows\"",
-    "sec-fetch-dest": "empty",
-    "sec-fetch-mode": "cors",
-    "sec-fetch-site": "same-origin",
-    "sec-gpc": "1",
-    "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-}
+try:
+    from g4f.gui.server.crypto import create_or_read_keys, decrypt_data, get_session_key
+    has_crypto = True
+except ImportError:
+    has_crypto = False
 
-INIT_HEADERS = {
-    'accept': '*/*',
-    'accept-language': 'en-US,en;q=0.8',
-    'cache-control': 'no-cache',
-    'pragma': 'no-cache',
-    'priority': 'u=0, i',
-    "sec-ch-ua": "\"Google Chrome\";v=\"131\", \"Chromium\";v=\"131\", \"Not_A Brand\";v=\"24\"",
-    'sec-ch-ua-arch': '"arm"',
-    'sec-ch-ua-bitness': '"64"',
-    'sec-ch-ua-mobile': '?0',
-    'sec-ch-ua-model': '""',
-    "sec-ch-ua-platform": "\"Windows\"",
-    'sec-ch-ua-platform-version': '"14.4.0"',
-    'sec-fetch-dest': 'document',
-    'sec-fetch-mode': 'navigate',
-    'sec-fetch-site': 'none',
-    'sec-fetch-user': '?1',
-    'upgrade-insecure-requests': '1',
-    "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-}
+logger = logging.getLogger(__name__)
 
-UPLOAD_HEADERS = {
-    "accept": "application/json, text/plain, */*",
-    'accept-language': 'en-US,en;q=0.8',
-    "referer": "https://chatgpt.com/",
-    "priority": "u=1, i",
-    "sec-ch-ua": "\"Google Chrome\";v=\"131\", \"Chromium\";v=\"131\", \"Not_A Brand\";v=\"24\"",
-    "sec-ch-ua-mobile": "?0",
-    'sec-ch-ua-platform': '"macOS"',
-    "sec-fetch-dest": "empty",
-    "sec-fetch-mode": "cors",
-    "sec-fetch-site": "cross-site",
-    "x-ms-blob-type": "BlockBlob",
-    "x-ms-version": "2020-04-08",
-    "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-}
-
-ImagesCache: Dict[str, dict] = {}
-
-
-class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
-    """A class for creating and managing conversations with OpenAI chat service"""
-
-    label = "OpenAI ChatGPT"
-    url = "https://chatgpt.com"
-    working = True
-    active_by_default = True
-    use_nodriver = True
-    image_cache = True
-    supports_gpt_4 = True
-    supports_message_history = True
-    supports_system_message = True
-    default_model = default_model
-    default_image_model = default_image_model
-    image_models = image_models
-    vision_models = text_models
-    models = models
-    model_aliases = model_aliases
-    synthesize_content_type = "audio/aac"
-    request_config = RequestConfig()
-
-    _api_key: str = None
-    _headers: dict = None
-    _cookies: Cookies = None
-    _expires: int = None
-
-    @classmethod
-    async def on_auth_async(cls, proxy: str = None, **kwargs) -> AsyncIterator:
-        async for chunk in cls.login(proxy=proxy):
-            yield chunk
-        yield AuthResult(
-            api_key=cls._api_key,
-            cookies=cls._cookies or cls.request_config.cookies or {},
-            headers=cls._headers or cls.request_config.headers or cls.get_default_headers(),
-            expires=cls._expires,
-            proof_token=cls.request_config.proof_token,
-            turnstile_token=cls.request_config.turnstile_token
-        )
-
-    @classmethod
-    async def upload_files(
-            cls,
-            session: StreamSession,
-            auth_result: AuthResult,
-            media: MediaListType,
-    ) -> List[ImageRequest]:
-        """
-        Upload an image to the service and get the download URL
-        
-        Args:
-            session: The StreamSession object to use for requests
-            headers: The headers to include in the requests
-            media: The files to upload, either a PIL Image object or a bytes object
-        
-        Returns:
-            An ImageRequest object that contains the download URL, file name, and other data
-        """
-
-        async def upload_file(file, image_name=None) -> ImageRequest:
-            debug.log(f"Uploading file: {image_name}")
-            file_data = {}
-
-            data_bytes = to_bytes(file)
-            # Check Cache
-            hasher = hashlib.md5()
-            hasher.update(data_bytes)
-            image_hash = hasher.hexdigest()
-            cache_file = ImagesCache.get(image_hash)
-            if cls.image_cache and cache_file:
-                debug.log("Using cached image")
-                return ImageRequest(cache_file)
-            extension, mime_type = detect_file_type(data_bytes)
-            if "image" in mime_type:
-                # Convert the image to a PIL Image object
-                file = to_image(data_bytes)
-                use_case = "multimodal"
-                file_data.update({"height": file.height, "width": file.width})
-            else:
-                use_case = "my_files"
-            image_name = (
-                f"file-{len(data_bytes)}{extension}"
-                if image_name is None
-                else image_name
-            )
-            data = {
-                "file_name": image_name,
-                "file_size": len(data_bytes),
-                "use_case": use_case,
-            }
-            # Post the image data to the service and get the image data
-            async with session.post(f"{cls.url}/backend-api/files", json=data, headers=cls._headers) as response:
-                cls._update_request_args(auth_result, session)
-                await raise_for_status(response, "Create file failed")
-                file_data.update(
-                    {
-                        **data,
-                        **await response.json(),
-                        "mime_type": mime_type,
-                        "extension": extension,
-                    }
-                )
-            # Put the image bytes to the upload URL and check the status
-            await asyncio.sleep(1)
-            async with session.put(
-                    file_data["upload_url"],
-                    data=data_bytes,
-                    headers={
-                        **UPLOAD_HEADERS,
-                        "Content-Type": file_data["mime_type"],
-                        "x-ms-blob-type": "BlockBlob",
-                        "x-ms-version": "2020-04-08",
-                        "Origin": "https://chatgpt.com",
-                    }
-            ) as response:
-                await raise_for_status(response)
-            # Post the file ID to the service and get the download URL
-            async with session.post(
-                    f"{cls.url}/backend-api/files/{file_data['file_id']}/uploaded",
-                    json={},
-                    headers=auth_result.headers
-            ) as response:
-                cls._update_request_args(auth_result, session)
-                await raise_for_status(response, "Get download url failed")
-                uploaded_data = await response.json()
-                file_data["download_url"] = uploaded_data["download_url"]
-            ImagesCache[image_hash] = file_data.copy()
-            return ImageRequest(file_data)
-
-        medias: List["ImageRequest"] = []
-        for item in media:
-            item = item if isinstance(item, tuple) else (item,)
-            __uploaded_media = await upload_file(*item)
-            medias.append(__uploaded_media)
-        return medias
-
-    @classmethod
-    def create_messages(cls, messages: Messages, image_requests: ImageRequest = None, system_hints: list = None):
-        """
-        Create a list of messages for the user input
-        
-        Args:
-            prompt: The user input as a string
-            image_response: The image response object, if any
-        
-        Returns:
-            A list of messages with the user input and the image, if any
-        """
-        # merged_messages = []
-        # last_message = None
-        # for message in messages:
-        #     current_message = last_message
-        #     if current_message is not None:
-        #         if current_message["role"] == message["role"]:
-        #             current_message["content"] += "\n" + message["content"]
-        #         else:
-        #             merged_messages.append(current_message)
-        #             last_message = message.copy()
-        #     else:
-        #         last_message = message.copy()
-        # if last_message is not None:
-        #     merged_messages.append(last_message)
-
-        messages = [{
-            "id": str(uuid.uuid4()),
-            "author": {"role": message["role"]},
-            "content": {"content_type": "text", "parts": [to_string(message["content"])]},
-            "metadata": {"serialization_metadata": {"custom_symbol_offsets": []},
-                         **({"system_hints": system_hints} if system_hints else {})},
-            "create_time": time.time(),
-        } for message in messages]
-        # Check if there is an image response
-        if image_requests:
-            # Change content in last user message
-            messages[-1]["content"] = {
-                "content_type": "multimodal_text",
-                "parts": [*[{
-                    "asset_pointer": f"file-service://{image_request.get('file_id')}",
-                    "height": image_request.get("height"),
-                    "size_bytes": image_request.get("file_size"),
-                    "width": image_request.get("width"),
-                }
-                    for image_request in image_requests
-                    # Add For Images Only
-                    if image_request.get("use_case") == "multimodal"
-                ],
-                          messages[-1]["content"]["parts"][0]]
-            }
-            # Add the metadata object with the attachments
-            messages[-1]["metadata"] = {
-                "attachments": [{
-                    "id": image_request.get("file_id"),
-                    "mimeType": image_request.get("mime_type"),
-                    "name": image_request.get("file_name"),
-                    "size": image_request.get("file_size"),
-                    **(
-                        {
-                            "height": image_request.get("height"),
-                            "width": image_request.get("width"),
-                        }
-                        if image_request.get("use_case") == "multimodal"
-                        else {}
-                    ),
-                }
-                    for image_request in image_requests]
-            }
-        return messages
-
-    @classmethod
-    async def get_generated_image(cls, session: StreamSession, auth_result: AuthResult, element: Union[dict, str],
-                                  prompt: str = None, conversation_id: str = None,
-                                  status: Optional[str] = None) -> ImagePreview | ImageResponse | None:
-        download_urls = []
-        is_sediment = False
-        if prompt is None:
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Read cookie files if not ignored
+    if not AppConfig.ignore_cookie_files:
+        read_cookie_files()
+    AppConfig.g4f_api_key = os.environ.get("G4F_API_KEY", AppConfig.g4f_api_key)
+    AppConfig.timeout = int(os.environ.get("G4F_TIMEOUT", AppConfig.timeout))
+    AppConfig.stream_timeout = int(os.environ.get("G4F_STREAM_TIMEOUT", AppConfig.stream_timeout))
+    yield
+    if has_nodriver:
+        for browser in util.get_registered_instances():
+            if browser.connection:
+                browser.stop()
+        lock_file = os.path.join(get_cookies_dir(), ".nodriver_is_open")
+        if os.path.exists(lock_file):
             try:
-                prompt = element["metadata"]["dalle"]["prompt"]
+                os.remove(lock_file)
+            except Exception as e:
+                debug.error(f"Failed to remove lock file {lock_file}:", e)
+
+def create_app():
+    app = FastAPI(lifespan=lifespan)
+
+    # Add CORS middleware
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+        expose_headers=["*"],
+    )
+
+    api = Api(app)
+
+    api.register_routes()
+    api.register_authorization()
+    api.register_validation_exception_handler()
+
+    if AppConfig.gui:
+        if not has_a2wsgi:
+            raise MissingRequirementsError("a2wsgi is required for GUI. Install it with: pip install a2wsgi")
+        gui_app = WSGIMiddleware(get_gui_app(AppConfig.demo, AppConfig.timeout, AppConfig.stream_timeout))
+        app.mount("/", gui_app)
+
+    if AppConfig.ignored_providers:
+        for provider in AppConfig.ignored_providers:
+            if provider in Provider.__map__:
+                Provider.__map__[provider].working = False
+
+    return app
+
+def create_app_debug():
+    g4f.debug.logging = True
+    return create_app()
+
+def create_app_with_gui_and_debug():
+    g4f.debug.logging = True
+    AppConfig.gui = True
+    return create_app()
+
+def create_app_with_demo_and_debug():
+    g4f.debug.logging = True
+    AppConfig.gui = True
+    AppConfig.demo = True
+    return create_app()
+
+class ErrorResponse(Response):
+    media_type = "application/json"
+
+    @classmethod
+    def from_exception(cls, exception: Exception,
+                       config: Union[ChatCompletionsConfig, ImageGenerationConfig] = None,
+                       status_code: int = HTTP_500_INTERNAL_SERVER_ERROR):
+        return cls(format_exception(exception, config), status_code)
+
+    @classmethod
+    def from_message(cls, message: str, status_code: int = HTTP_500_INTERNAL_SERVER_ERROR, headers: dict = None):
+        return cls(format_exception(message), status_code, headers=headers)
+
+    def render(self, content) -> bytes:
+        return str(content).encode(errors="ignore")
+
+class AppConfig:
+    ignored_providers: Optional[list[str]] = None
+    g4f_api_key: Optional[str] = None
+    ignore_cookie_files: bool = False
+    model: str = None
+    provider: str = None
+    media_provider: str = None
+    proxy: str = None
+    gui: bool = False
+    demo: bool = False
+    timeout: int = DEFAULT_TIMEOUT
+    stream_timeout: int = DEFAULT_STREAM_TIMEOUT
+
+    @classmethod
+    def set_config(cls, **data):
+        for key, value in data.items():
+            if value is not None:
+                setattr(cls, key, value)
+
+def update_headers(request: Request, new_api_key: str = None, user: str = None) -> Request:
+    new_headers = request.headers.mutablecopy()
+    if new_api_key:
+        new_headers["authorization"] = f"Bearer {new_api_key}"
+    if user:
+        new_headers["x-user"] = user
+    request.scope["headers"] = new_headers.raw
+    delattr(request, "_headers")
+    return request
+
+class Api:
+    def __init__(self, app: FastAPI) -> None:
+        self.app = app
+        self.client = AsyncClient()
+        self.get_g4f_api_key = APIKeyHeader(name="g4f-api-key")
+        self.conversations: dict[str, dict[str, BaseConversation]] = {}
+
+    security = HTTPBearer(auto_error=False)
+    basic_security = HTTPBasic()
+
+    async def get_username(self, request: Request) -> str:
+        credentials = await self.basic_security(request)
+        current_password_bytes = credentials.password.encode()
+        is_correct_password = secrets.compare_digest(
+            current_password_bytes, AppConfig.g4f_api_key.encode()
+        )
+        if not is_correct_password:
+            raise HTTPException(
+                status_code=HTTP_401_UNAUTHORIZED,
+                detail="Incorrect username or password",
+                headers={"WWW-Authenticate": "Basic"},
+            )
+        return credentials.username
+
+    def register_authorization(self):
+        if AppConfig.g4f_api_key:
+            print(f"Register authentication key: {''.join(['*' for _ in range(len(AppConfig.g4f_api_key))])}")
+        if has_crypto:
+            private_key, _ = create_or_read_keys()
+            session_key = get_session_key()
+        @self.app.middleware("http")
+        async def authorization(request: Request, call_next):
+            user = None
+            if request.method != "OPTIONS" and AppConfig.g4f_api_key is not None or AppConfig.demo:
+                update_authorization = False
+                try:
+                    user_g4f_api_key = await self.get_g4f_api_key(request)
+                except HTTPException:
+                    user_g4f_api_key = getattr(await self.security(request), "credentials", None)
+                    update_authorization = True
+                if user_g4f_api_key:
+                    user_g4f_api_key = user_g4f_api_key.split()
+                country = request.headers.get("Cf-Ipcountry", "")
+                if AppConfig.demo and user is None:
+                    ip = request.headers.get("X-Forwarded-For", "")[:4].strip(":.")
+                    user = request.headers.get("x-user", ip)
+                    user = f"{country}:{user}" if country else user
+                if AppConfig.g4f_api_key is None or not user_g4f_api_key or not secrets.compare_digest(AppConfig.g4f_api_key, user_g4f_api_key[0]):
+                    if has_crypto and user_g4f_api_key:
+                        try:
+                            expires, user = decrypt_data(private_key, user_g4f_api_key[0]).split(":", 1)
+                        except:
+                            try:
+                                data = json.loads(decrypt_data(session_key, user_g4f_api_key[0]))
+                                debug.log(f"Decrypted G4F API key data: {data}")
+                                expires = int(decrypt_data(private_key, data.pop("data"))) + 86400
+                                user = data.get("user", user)
+                                if not user or "referrer" not in data:
+                                    raise ValueError("User not found")
+                            except:
+                                return ErrorResponse.from_message(f"Invalid G4F API key", HTTP_401_UNAUTHORIZED)
+                        user = f"{country}:{user}" if country else user
+                        expires = int(expires) - int(time.time())
+                        hours, remainder = divmod(expires, 3600)
+                        minutes, seconds = divmod(remainder, 60)
+                        if expires < 0:
+                            debug.log(f"G4F API key expired for user '{user}'")
+                            return ErrorResponse.from_message("G4F API key expired", HTTP_401_UNAUTHORIZED)
+                        count = 0
+                        for char in user:
+                            if char.isupper():
+                                count += 1
+                        if count >= 6:
+                            debug.log(f"Invalid user name (screaming): '{user}'")
+                            return ErrorResponse.from_message("Invalid user name (screaming)", HTTP_401_UNAUTHORIZED)
+                        debug.log(f"User: '{user}' G4F API key expires in {hours}h {minutes}m {seconds}s")
+                else:
+                    user = "admin"
+                path = request.url.path
+                if path.startswith("/v1") or path.startswith("/api/") or (AppConfig.demo and path == '/backend-api/v2/upload_cookies'):
+                    if request.method != "OPTIONS" and not path.endswith("/models"):
+                        if not user_g4f_api_key:
+                            return ErrorResponse.from_message("G4F API key required", HTTP_401_UNAUTHORIZED)
+                        if AppConfig.g4f_api_key is None and user is None:
+                            return ErrorResponse.from_message("Invalid G4F API key", HTTP_403_FORBIDDEN)
+                elif not AppConfig.demo and not path.startswith("/images/") and not path.startswith("/media/"):
+                    if user_g4f_api_key:
+                        if user is None:
+                            return ErrorResponse.from_message("Invalid G4F API key", HTTP_403_FORBIDDEN)
+                    elif path.startswith("/backend-api/") or path.startswith("/chat/"):
+                        try:
+                            user = await self.get_username(request)
+                        except HTTPException as e:
+                            return ErrorResponse.from_message(e.detail, e.status_code, e.headers)
+                if user_g4f_api_key and update_authorization:
+                    new_api_key = user_g4f_api_key.pop()
+                else:
+                    new_api_key = None
+                request = update_headers(request, new_api_key, user)
+            response = await call_next(request)
+            return response
+
+    def register_validation_exception_handler(self):
+        @self.app.exception_handler(RequestValidationError)
+        async def validation_exception_handler(request: Request, exc: RequestValidationError):
+            details = exc.errors()
+            modified_details = []
+            for error in details:
+                modified_details.append({
+                    "loc": error["loc"],
+                    "message": error["msg"],
+                    "type": error["type"],
+                })
+            return JSONResponse(
+                status_code=HTTP_422_UNPROCESSABLE_ENTITY,
+                content=jsonable_encoder({"detail": modified_details}),
+            )
+
+    def register_routes(self):
+        if not AppConfig.gui:
+            @self.app.get("/")
+            async def read_root():
+                return RedirectResponse("/v1", 302)
+
+        @self.app.get("/v1")
+        async def read_root_v1():
+            return HTMLResponse('g4f API: Go to '
+                                '<a href="/v1/models">models</a>, '
+                                '<a href="/v1/chat/completions">chat/completions</a>, or '
+                                '<a href="/v1/media/generate">media/generate</a> <br><br>'
+                                'Open Swagger UI at: '
+                                '<a href="/docs">/docs</a>')
+
+        @self.app.get("/v1/models", responses={
+            HTTP_200_OK: {"model": List[ModelResponseModel]},
+        })
+        async def models():
+            return {
+                "object": "list",
+                "data": [{
+                    "id": model,
+                    "object": "model",
+                    "created": 0,
+                    "owned_by": "",
+                    "image": isinstance(model, g4f.models.ImageModel),
+                    "vision": isinstance(model, g4f.models.VisionModel),
+                    "provider": False,
+                } for model in AnyProvider.get_models()] +
+                [{
+                    "id": provider_name,
+                    "object": "model",
+                    "created": 0,
+                    "owned_by": getattr(provider, "label", ""),
+                    "image": bool(getattr(provider, "image_models", False)),
+                    "vision": bool(getattr(provider, "vision_models", False)),
+                    "provider": True,
+                } for provider_name, provider in Provider.ProviderUtils.convert.items()
+                    if provider.working and provider_name not in ("Custom")
+                ]
+            }
+
+        @self.app.get("/api/{provider}/models", responses={
+            HTTP_200_OK: {"model": List[ModelResponseModel]},
+        })
+        async def models(provider: str, credentials: Annotated[HTTPAuthorizationCredentials, Depends(Api.security)] = None):
+            if provider not in Provider.__map__:
+                if provider in model_map:
+                    return {
+                        "object": "list",
+                        "data": [{
+                            "id": provider,
+                            "object": "model",
+                            "created": 0,
+                            "owned_by": provider,
+                            "image": provider in image_models,
+                            "vision": provider in vision_models,
+                            "audio": provider in audio_models,
+                            "video": provider in video_models,
+                            "type": "image" if provider in image_models else "chat",
+                        }]
+                    }
+                return ErrorResponse.from_message("The provider does not exist.", 404)
+            provider: ProviderType = Provider.__map__[provider]
+            if not hasattr(provider, "get_models"):
+                models = []
+            elif credentials is not None and credentials.credentials != "secret":
+                models = provider.get_models(api_key=credentials.credentials)
+            else:
+                models = provider.get_models()
+            return {
+                "object": "list",
+                "data": [{
+                    "id": model,
+                    "object": "model",
+                    "created": 0,
+                    "owned_by": getattr(provider, "label", provider.__name__),
+                    "image": model in getattr(provider, "image_models", []),
+                    "vision": model in getattr(provider, "vision_models", []),
+                    "audio": model in getattr(provider, "audio_models", []),
+                    "video": model in getattr(provider, "video_models", []),
+                    "type": "image" if model in getattr(provider, "image_models", []) else "chat",
+                } for model in models]
+            }
+
+        @self.app.get("/v1/models/{model_name}", responses={
+            HTTP_200_OK: {"model": ModelResponseModel},
+            HTTP_404_NOT_FOUND: {"model": ErrorResponseModel},
+        })
+        @self.app.post("/v1/models/{model_name}", responses={
+            HTTP_200_OK: {"model": ModelResponseModel},
+            HTTP_404_NOT_FOUND: {"model": ErrorResponseModel},
+        })
+        async def model_info(model_name: str) -> ModelResponseModel:
+            if model_name in g4f.models.ModelUtils.convert:
+                model_info = g4f.models.ModelUtils.convert[model_name]
+                return JSONResponse({
+                    'id': model_name,
+                    'object': 'model',
+                    'created': 0,
+                    'owned_by': model_info.base_provider
+                })
+            return ErrorResponse.from_message("The model does not exist.", HTTP_404_NOT_FOUND)
+
+        responses = {
+            HTTP_200_OK: {"model": ChatCompletion},
+            HTTP_401_UNAUTHORIZED: {"model": ErrorResponseModel},
+            HTTP_404_NOT_FOUND: {"model": ErrorResponseModel},
+            HTTP_422_UNPROCESSABLE_ENTITY: {"model": ErrorResponseModel},
+            HTTP_500_INTERNAL_SERVER_ERROR: {"model": ErrorResponseModel},
+        }
+        @self.app.post("/v1/chat/completions", responses=responses)
+        @self.app.post("/api/{provider}/chat/completions", responses=responses)
+        @self.app.post("/api/{provider}/{conversation_id}/chat/completions", responses=responses)
+        async def chat_completions(
+            config: ChatCompletionsConfig,
+            credentials: Annotated[HTTPAuthorizationCredentials, Depends(Api.security)] = None,
+            provider: str = None,
+            conversation_id: str = None,
+            x_user: Annotated[str | None, Header()] = None,
+        ):
+            if provider is not None and provider not in Provider.__map__:
+                if provider in model_map:
+                    config.model = provider
+                    provider = None
+                else:
+                    return ErrorResponse.from_message("Invalid provider.", HTTP_404_NOT_FOUND)
+            try:
+                if config.provider is None:
+                    config.provider = AppConfig.provider if provider is None else provider
+                if config.conversation_id is None:
+                    config.conversation_id = conversation_id
+                if config.timeout is None:
+                    config.timeout = AppConfig.timeout
+                if config.stream_timeout is None and config.stream:
+                    config.stream_timeout = AppConfig.stream_timeout
+                if credentials is not None and credentials.credentials != "secret":
+                    config.api_key = credentials.credentials
+
+                conversation = config.conversation
+                if conversation:
+                    conversation = JsonConversation(**conversation)
+                elif config.conversation_id is not None and config.provider is not None:
+                    if config.conversation_id in self.conversations:
+                        if config.provider in self.conversations[config.conversation_id]:
+                            conversation = self.conversations[config.conversation_id][config.provider]
+
+                if config.image is not None:
+                    try:
+                        is_data_an_media(config.image)
+                    except ValueError as e:
+                        return ErrorResponse.from_message(f"The image you send must be a data URI. Example: data:image/jpeg;base64,...", status_code=HTTP_422_UNPROCESSABLE_ENTITY)
+                if config.media is None:
+                    config.media = config.images
+                if config.media is not None:
+                    for image in config.media:
+                        try:
+                            is_data_an_media(image[0], image[1])
+                        except ValueError as e:
+                            example = json.dumps({"media": [["data:image/jpeg;base64,...", "filename.jpg"]]})
+                            return ErrorResponse.from_message(f'The media you send must be a data URIs. Example: {example}', status_code=HTTP_422_UNPROCESSABLE_ENTITY)
+
+                # Create the completion response
+                response = self.client.chat.completions.create(
+                    **filter_none(
+                        **{
+                            "model": AppConfig.model,
+                            "provider": AppConfig.provider,
+                            "proxy": AppConfig.proxy,
+                            **(config.model_dump(exclude_none=True) if hasattr(config, "model_dump") else config.dict(exclude_none=True)),
+                            **{
+                                "conversation_id": config.conversation_id,
+                                "conversation": conversation,
+                                "user": x_user,
+                            }
+                        },
+                        ignored=AppConfig.ignored_providers
+                    ),
+                )
+
+                if not config.stream:
+                    return await response
+
+                async def streaming():
+                    try:
+                        async for chunk in response:
+                            if isinstance(chunk, BaseConversation):
+                                if config.conversation_id is not None and config.provider is not None:
+                                    if config.conversation_id not in self.conversations:
+                                        self.conversations[config.conversation_id] = {}
+                                    self.conversations[config.conversation_id][config.provider] = chunk
+                            else:
+                                yield f"data: {chunk.model_dump_json() if hasattr(chunk, 'model_dump_json') else chunk.json()}\n\n"
+                    except GeneratorExit:
+                        pass
+                    except Exception as e:
+                        logger.exception(e)
+                        yield f'data: {format_exception(e, config)}\n\n'
+                    yield "data: [DONE]\n\n"
+
+                return StreamingResponse(streaming(), media_type="text/event-stream")
+
+            except (ModelNotFoundError, ProviderNotFoundError) as e:
+                logger.exception(e)
+                return ErrorResponse.from_exception(e, config, HTTP_404_NOT_FOUND)
+            except (MissingAuthError, NoValidHarFileError) as e:
+                logger.exception(e)
+                return ErrorResponse.from_exception(e, config, HTTP_401_UNAUTHORIZED)
+            except Exception as e:
+                logger.exception(e)
+                return ErrorResponse.from_exception(e, config, HTTP_500_INTERNAL_SERVER_ERROR)
+
+        responses = {
+            HTTP_200_OK: {"model": ImagesResponse},
+            HTTP_401_UNAUTHORIZED: {"model": ErrorResponseModel},
+            HTTP_404_NOT_FOUND: {"model": ErrorResponseModel},
+            HTTP_500_INTERNAL_SERVER_ERROR: {"model": ErrorResponseModel},
+        }
+        @self.app.post("/v1/media/generate", responses=responses)
+        @self.app.post("/v1/images/generate", responses=responses)
+        @self.app.post("/v1/images/generations", responses=responses)
+        @self.app.post("/api/{provider}/images/generations", responses=responses)
+        async def generate_image(
+            request: Request,
+            config: ImageGenerationConfig,
+            provider: str = None,
+            credentials: Annotated[HTTPAuthorizationCredentials, Depends(Api.security)] = None
+        ):
+            if provider is not None and provider not in Provider.__map__:
+                if provider in model_map:
+                    config.model = provider
+                    provider = None
+                return ErrorResponse.from_message("", HTTP_404_NOT_FOUND)
+            if config.provider is None:
+                config.provider = provider
+            if config.provider is None:
+                config.provider = AppConfig.media_provider
+            if config.api_key is None and credentials is not None and credentials.credentials != "secret":
+                config.api_key = credentials.credentials
+            try:
+                response = await self.client.images.generate(
+                    **config.dict(exclude_none=True),
+                )
+                for image in response.data:
+                    if hasattr(image, "url") and image.url.startswith("/"):
+                        image.url = f"{request.base_url}{image.url.lstrip('/')}"
+                return response
+            except (ModelNotFoundError, ProviderNotFoundError) as e:
+                logger.exception(e)
+                return ErrorResponse.from_exception(e, config, HTTP_404_NOT_FOUND)
+            except MissingAuthError as e:
+                logger.exception(e)
+                return ErrorResponse.from_exception(e, config, HTTP_401_UNAUTHORIZED)
+            except Exception as e:
+                logger.exception(e)
+                return ErrorResponse.from_exception(e, config, HTTP_500_INTERNAL_SERVER_ERROR)
+
+        @self.app.get("/v1/providers", responses={
+            HTTP_200_OK: {"model": List[ProviderResponseModel]},
+        })
+        async def providers():
+            return [{
+                'id': provider.__name__,
+                'object': 'provider',
+                'created': 0,
+                'url': provider.url,
+                'label': getattr(provider, "label", None),
+            } for provider in Provider.__providers__ if provider.working]
+
+        @self.app.get("/v1/providers/{provider}", responses={
+            HTTP_200_OK: {"model": ProviderResponseDetailModel},
+            HTTP_404_NOT_FOUND: {"model": ErrorResponseModel},
+        })
+        async def providers_info(provider: str):
+            if provider not in Provider.ProviderUtils.convert:
+                return ErrorResponse.from_message("The provider does not exist.", 404)
+            provider: ProviderType = Provider.ProviderUtils.convert[provider]
+            def safe_get_models(provider: ProviderType) -> list[str]:
+                try:
+                    return provider.get_models() if hasattr(provider, "get_models") else []
+                except:
+                    return []
+            return {
+                'id': provider.__name__,
+                'object': 'provider',
+                'created': 0,
+                'url': provider.url,
+                'label': getattr(provider, "label", None),
+                'models': safe_get_models(provider),
+                'image_models': getattr(provider, "image_models", []) or [],
+                'vision_models': [model for model in [getattr(provider, "default_vision_model", None)] if model],
+                'params': [*provider.get_parameters()] if hasattr(provider, "get_parameters") else []
+            }
+
+        responses = {
+            HTTP_200_OK: {"model": TranscriptionResponseModel},
+            HTTP_401_UNAUTHORIZED: {"model": ErrorResponseModel},
+            HTTP_404_NOT_FOUND: {"model": ErrorResponseModel},
+            HTTP_500_INTERNAL_SERVER_ERROR: {"model": ErrorResponseModel},
+        }
+        @self.app.post("/v1/audio/transcriptions", responses=responses)
+        @self.app.post("/api/{path_provider}/audio/transcriptions", responses=responses)
+        @self.app.post("/api/markitdown", responses=responses)
+        async def convert(
+            file: UploadFile,
+            path_provider: str = None,
+            model: Annotated[Optional[str], Form()] = None,
+            provider: Annotated[Optional[str], Form()] = "MarkItDown",
+            prompt: Annotated[Optional[str], Form()] = "Transcribe this audio"
+        ):
+            provider = provider if path_provider is None else path_provider
+            if provider is not None and provider not in Provider.__map__:
+                if provider in model_map:
+                    model = provider
+                    provider = None
+                else:
+                    return ErrorResponse.from_message("Invalid provider.", HTTP_404_NOT_FOUND)
+            kwargs = {"modalities": ["text"]}
+            if provider == "MarkItDown":
+                kwargs = {
+                    "llm_client": self.client,
+                }
+            try:
+                response = await self.client.chat.completions.create(
+                    messages=prompt,
+                    model=model,
+                    provider=provider,
+                    media=[[file.file, file.filename]],
+                    **kwargs
+                )
+                return {"text": response.choices[0].message.content, "model": response.model, "provider": response.provider}
+            except (ModelNotFoundError, ProviderNotFoundError) as e:
+                logger.exception(e)
+                return ErrorResponse.from_exception(e, None, HTTP_404_NOT_FOUND)
+            except MissingAuthError as e:
+                logger.exception(e)
+                return ErrorResponse.from_exception(e, None, HTTP_401_UNAUTHORIZED)
+            except Exception as e:
+                logger.exception(e)
+                return ErrorResponse.from_exception(e, None, HTTP_500_INTERNAL_SERVER_ERROR)
+
+        responses = {
+            HTTP_200_OK: {"content": {"audio/*": {}}},
+            HTTP_401_UNAUTHORIZED: {"model": ErrorResponseModel},
+            HTTP_404_NOT_FOUND: {"model": ErrorResponseModel},
+            HTTP_500_INTERNAL_SERVER_ERROR: {"model": ErrorResponseModel},
+        }
+        @self.app.post("/v1/audio/speech", responses=responses)
+        @self.app.post("/api/{provider}/audio/speech", responses=responses)
+        async def generate_speech(
+            config: AudioSpeechConfig,
+            provider: str = AppConfig.media_provider,
+            credentials: Annotated[HTTPAuthorizationCredentials, Depends(Api.security)] = None
+        ):
+            api_key = None
+            if credentials is not None and credentials.credentials != "secret":
+                api_key = credentials.credentials
+            if provider is not None and provider not in Provider.__map__:
+                if provider in model_map:
+                    config.model = provider
+                    provider = None
+                else:
+                    return ErrorResponse.from_message("Invalid provider.", HTTP_404_NOT_FOUND)
+            try:
+                audio = filter_none(voice=config.voice, format=config.response_format, language=config.language)
+                response = await self.client.chat.completions.create(
+                    messages=[
+                        {"role": "user", "content": f"{config.instrcutions} Text: {config.input}"}
+                    ],
+                    model=config.model,
+                    provider=config.provider if provider is None else provider,
+                    prompt=config.input,
+                    api_key=api_key,
+                    download_media=config.download_media,
+                    **filter_none(
+                        audio=audio if audio else None,
+                    )
+                )
+                if response.choices[0].message.audio is not None:
+                    response = base64.b64decode(response.choices[0].message.audio.data)
+                    return Response(response, media_type=f"audio/{config.response_format.replace('mp3', 'mpeg')}")
+                elif isinstance(response.choices[0].message.content, AudioResponse):
+                    response = response.choices[0].message.content.data
+                    response = response.replace("/media", get_media_dir())
+                    def delete_file():
+                        try:
+                            os.remove(response)
+                        except Exception as e:
+                            logger.exception(e)
+                    return FileResponse(response, background=BackgroundTask(delete_file))
+            except (ModelNotFoundError, ProviderNotFoundError) as e:
+                logger.exception(e)
+                return ErrorResponse.from_exception(e, None, HTTP_404_NOT_FOUND)
+            except MissingAuthError as e:
+                logger.exception(e)
+                return ErrorResponse.from_exception(e, None, HTTP_401_UNAUTHORIZED)
+            except Exception as e:
+                logger.exception(e)
+                return ErrorResponse.from_exception(e, None, HTTP_500_INTERNAL_SERVER_ERROR)
+
+        @self.app.post("/v1/upload_cookies", responses={
+            HTTP_200_OK: {"model": List[FileResponseModel]},
+        })
+        def upload_cookies(
+            files: List[UploadFile],
+            credentials: Annotated[HTTPAuthorizationCredentials, Depends(Api.security)] = None
+        ):
+            response_data = []
+            if not AppConfig.ignore_cookie_files:
+                for file in files:
+                    try:
+                        if file and file.filename.endswith(".json") or file.filename.endswith(".har"):
+                            filename = os.path.basename(file.filename)
+                            with open(os.path.join(get_cookies_dir(), filename), 'wb') as f:
+                                shutil.copyfileobj(file.file, f)
+                            response_data.append({"filename": filename})
+                    finally:
+                        file.file.close()
+                read_cookie_files()
+            return response_data
+
+        @self.app.get("/images/{filename}", responses={
+            HTTP_200_OK: {"content": {"image/*": {}}},
+            HTTP_404_NOT_FOUND: {}
+        })
+        @self.app.get("/media/{filename}", responses={
+            HTTP_200_OK: {"content": {"image/*": {}, "audio/*": {}}, "video/*": {}},
+            HTTP_404_NOT_FOUND: {}
+        })
+        async def get_media(filename, request: Request, thumbnail: bool = False):
+            def get_timestamp(str):
+                m=re.match("^[0-9]+", str)
+                if m:
+                    return int(m.group(0))
+                else:
+                    return 0
+            target = os.path.join(get_media_dir(), os.path.basename(filename))
+            if thumbnail and has_pillow:
+                thumbnail_dir = os.path.join(get_media_dir(), "thumbnails")
+                thumbnail = os.path.join(thumbnail_dir, filename)
+            if not os.path.isfile(target):
+                other_name = os.path.join(get_media_dir(), os.path.basename(quote_plus(filename)))
+                if os.path.isfile(other_name):
+                    target = other_name
+            ext = os.path.splitext(filename)[1][1:]
+            mime_type = EXTENSIONS_MAP.get(ext)
+            stat_result = SimpleNamespace()
+            stat_result.st_size = 0
+            stat_result.st_mtime = get_timestamp(filename)
+            if thumbnail and has_pillow and os.path.isfile(thumbnail):
+                stat_result.st_size = os.stat(thumbnail).st_size
+            elif not thumbnail and os.path.isfile(target):
+                stat_result.st_size = os.stat(target).st_size
+            headers = {
+                "cache-control": "public, max-age=31536000",
+                "last-modified": formatdate(stat_result.st_mtime, usegmt=True),
+                "etag": f'"{hashlib.md5(filename.encode()).hexdigest()}"',
+                **({
+                    "content-length": str(stat_result.st_size),
+                } if stat_result.st_size else {}),
+                **({} if thumbnail or mime_type is None else {
+                    "content-type": mime_type,
+                })
+            }
+            response = FileResponse(
+                target,
+                headers=headers,
+                filename=filename,
+            )
+            try:
+                if_none_match = request.headers["if-none-match"]
+                etag = response.headers["etag"]
+                if etag in [tag.strip(" W/") for tag in if_none_match.split(",")]:
+                    return NotModifiedResponse(response.headers)
             except KeyError:
                 pass
-        if "asset_pointer" in element:
-            element = element["asset_pointer"]
-        if isinstance(element, str) and element.startswith("file-service://"):
-            element = element.split("file-service://", 1)[-1]
-        elif isinstance(element, str) and element.startswith("sediment://"):
-            is_sediment = True
-            element = element.split("sediment://")[-1]
-        else:
-            raise RuntimeError(f"Invalid image element: {element}")
-        if is_sediment:
-            url = f"{cls.url}/backend-api/conversation/{conversation_id}/attachment/{element}/download"
-        else:
-            url = f"{cls.url}/backend-api/files/{element}/download"
-        try:
-            async with session.get(url, headers=auth_result.headers) as response:
-                cls._update_request_args(auth_result, session)
-                await raise_for_status(response)
-                data = await response.json()
-                download_url = data.get("download_url")
-                if download_url is not None:
-                    download_urls.append(download_url)
-                    debug.log(f"OpenaiChat: Found image: {download_url}")
-                else:
-                    debug.log("OpenaiChat: No download URL found in response: ", data)
-        except Exception as e:
-            debug.error("OpenaiChat: Download image failed")
-            debug.error(e)
-        if download_urls:
-            # status = None, finished_successfully
-            if is_sediment and status != "finished_successfully":
-                return ImagePreview(download_urls, prompt, {"status": status, "headers": auth_result.headers})
+            if not os.path.isfile(target) and mime_type is not None:
+                source_url = get_source_url(str(request.query_params))
+                ssl = None
+                if source_url is None:
+                    backend_url = os.environ.get("G4F_BACKEND_URL")
+                    if backend_url:
+                        source_url = f"{backend_url}/media/{filename}"
+                        ssl = False
+                if source_url is not None:
+                    try:
+                        await copy_media(
+                            [source_url],
+                            target=target, ssl=ssl)
+                        debug.log(f"File copied from {source_url}")
+                    except Exception as e:
+                        debug.error(f"Download failed:  {source_url}")
+                        debug.error(e)
+                        return RedirectResponse(url=source_url)
+            if thumbnail and has_pillow:
+                try:
+                    if not os.path.isfile(thumbnail):
+                        image = Image.open(target)
+                        os.makedirs(thumbnail_dir, exist_ok=True)
+                        process_image(image, save=thumbnail)
+                        debug.log(f"Thumbnail created: {thumbnail}")
+                except Exception as e:
+                    logger.exception(e)
+            if thumbnail and os.path.isfile(thumbnail):
+                result = thumbnail
             else:
-                return ImageResponse(download_urls, prompt, {"status": status, "headers": auth_result.headers})
-
-    @classmethod
-    async def create_authed(
-        cls,
-        model: str,
-        messages: Messages,
-        auth_result: AuthResult,
-        proxy: str = None,
-        timeout: int = 360,
-        auto_continue: bool = False,
-        action: Optional[str] = None,
-        conversation: Conversation = None,
-        media: MediaListType = None,
-        return_conversation: bool = True,
-        web_search: bool = False,
-        prompt: str = None,
-        conversation_mode: Optional[dict] = None,
-        temporary: Optional[bool] = None,
-        conversation_id: Optional[str] = None,
-        reasoning_effort: Optional[str] = None,
-        **kwargs
-    ) -> AsyncResult:
-        """
-        Create an asynchronous generator for the conversation.
-
-        Args:
-            model (str): The model name.
-            messages (Messages): The list of previous messages.
-            proxy (str): Proxy to use for requests.
-            timeout (int): Timeout for requests.
-            api_key (str): Access token for authentication.
-            auto_continue (bool): Flag to automatically continue the conversation.
-            action (str): Type of action ('next', 'continue', 'variant').
-            media (MediaListType): Images to include in the conversation.
-            return_conversation (bool): Flag to include response fields in the output.
-            **kwargs: Additional keyword arguments.
-
-        Yields:
-            AsyncResult: Asynchronous results from the generator.
-
-        Raises:
-            RuntimeError: If an error occurs during processing.
-        """
-        if temporary is None:
-            temporary = action is not None and conversation_id is None
-        if action is None:
-            action = "next"
-        async with StreamSession(
-            proxy=proxy,
-            impersonate="chrome",
-            timeout=timeout
-        ) as session:
-            image_requests = None
-            media = merge_media(media, messages)
-            if not cls.needs_auth and not media:
-                if cls._headers is None:
-                    cls._create_request_args(cls._cookies)
-                    async with session.get(cls.url, headers=INIT_HEADERS) as response:
-                        cls._update_request_args(auth_result, session)
-                        await raise_for_status(response)
-            else:
-                if cls._headers is None and getattr(auth_result, "cookies", None):
-                    cls._create_request_args(auth_result.cookies, auth_result.headers)
-                if not cls._set_api_key(getattr(auth_result, "api_key", None)):
-                    raise MissingAuthError("Access token is not valid")
-                async with session.get(cls.url, headers=cls._headers) as response:
-                    cls._update_request_args(auth_result, session)
-                    await raise_for_status(response)
-
-                # try:
-                image_requests = await cls.upload_files(session, auth_result, media)
-                # except Exception as e:
-                #     debug.error("OpenaiChat: Upload image failed")
-                #     debug.error(e)
-            try:
-                model = cls.get_model(model)
-            except ModelNotFoundError:
-                pass
-            image_model = False
-            if model in cls.image_models:
-                image_model = True
-                model = cls.default_model
-            if conversation is None:
-                conversation = Conversation(conversation_id, str(uuid.uuid4()), getattr(auth_result, "cookies", {}).get("oai-did"))
-            else:
-                conversation = copy(conversation)
-
-            if conversation_mode is None:
-                conversation_mode = {"kind": "primary_assistant"}
-
-            if getattr(auth_result, "cookies", {}).get("oai-did") != getattr(conversation, "user_id", None):
-                if getattr(conversation, "user_id", None) is None:
-                    conversation.user_id = getattr(auth_result, "cookies", {}).get("oai-did")
-                else:
-                    conversation = Conversation(None, str(uuid.uuid4()), getattr(auth_result, "cookies", {}).get("oai-did"))
-            if cls._api_key is None:
-                auto_continue = False
-            conversation.finish_reason = None
-            sources = OpenAISources([])
-            references = ContentReferences()
-            while conversation.finish_reason is None:
-                conduit_token = None
-                if cls._api_key is not None:
-                    data = {
-                        "action": "next",
-                        "fork_from_shared_post": False,
-                        "parent_message_id": conversation.message_id,
-                        "model": model,
-                        "timezone_offset_min": -120,
-                        "timezone": "Europe/Berlin",
-                        "conversation_mode": {"kind": "primary_assistant"},
-                        "system_hints": [
-                            "picture_v2"
-                        ] if image_model else [],
-                        "thinking_effort": "extended" if reasoning_effort == "high" else "standard",
-                        "supports_buffering": True,
-                        "supported_encodings": ["v1"]
-                    }
-                    if temporary:
-                        data["history_and_training_disabled"] = True
-                    async with session.post(
-                            prepare_url,
-                            json=data,
-                            headers=cls._headers
-                    ) as response:
-                        await raise_for_status(response)
-                        conduit_token = (await response.json())["conduit_token"]
-                async with session.post(
-                        f"{cls.url}/backend-anon/sentinel/chat-requirements"
-                        if cls._api_key is None else
-                        f"{cls.url}/backend-api/sentinel/chat-requirements",
-                        json={"p": None if not getattr(auth_result, "proof_token", None) else get_requirements_token(
-                            getattr(auth_result, "proof_token", None))},
-                        headers=cls._headers
-                ) as response:
-                    if response.status in (401, 403):
-                        raise MissingAuthError(f"Response status: {response.status}")
-                    else:
-                        cls._update_request_args(auth_result, session)
-                    await raise_for_status(response)
-                    chat_requirements = await response.json()
-                    need_turnstile = chat_requirements.get("turnstile", {}).get("required", False)
-                    need_arkose = chat_requirements.get("arkose", {}).get("required", False)
-                    chat_token = chat_requirements.get("token")
-
-                    # if need_arkose and cls.request_config.arkose_token is None:
-                #     await get_request_config(proxy)
-                #     cls._create_request_args(auth_result.cookies, auth_result.headers)
-                #     cls._set_api_key(auth_result.access_token)
-                #     if auth_result.arkose_token is None:
-                #         raise MissingAuthError("No arkose token found in .har file")
-                if "proofofwork" in chat_requirements:
-                    user_agent = getattr(auth_result, "headers", {}).get("user-agent")
-                    proof_token = getattr(auth_result, "proof_token", None)
-                    if proof_token is None:
-                        auth_result.proof_token = get_config(user_agent)
-                    proofofwork = generate_proof_token(
-                        **chat_requirements["proofofwork"],
-                        user_agent=user_agent,
-                        proof_token=proof_token
-                    )
-                # [debug.log(text) for text in (
-                # f"Arkose: {'False' if not need_arkose else auth_result.arkose_token[:12]+'...'}",
-                # f"Proofofwork: {'False' if proofofwork is None else proofofwork[:12]+'...'}",
-                # f"AccessToken: {'False' if cls._api_key is None else cls._api_key[:12]+'...'}",
-                # )]
-                data = {
-                    "action": "next",
-                    "parent_message_id": conversation.message_id,
-                    "model": model,
-                    "timezone_offset_min": -120,
-                    "timezone": "Europe/Berlin",
-                    "conversation_mode": {"kind": "primary_assistant"},
-                    "enable_message_followups": True,
-                    "system_hints": ["search"] if web_search else None,
-                    "thinking_effort": "extended" if reasoning_effort == "high" else "standard",
-                    "supports_buffering": True,
-                    "supported_encodings": ["v1"],
-                    "client_contextual_info": {"is_dark_mode": False, "time_since_loaded": random.randint(20, 500),
-                                               "page_height": 578, "page_width": 1850, "pixel_ratio": 1,
-                                               "screen_height": 1080, "screen_width": 1920},
-                    "paragen_cot_summary_display_override": "allow"
-                }
-                if temporary:
-                    data["history_and_training_disabled"] = True
-
-                if conversation.conversation_id is not None and not temporary:
-                    data["conversation_id"] = conversation.conversation_id
-                    debug.log(f"OpenaiChat: Use conversation: {conversation.conversation_id}")
-                prompt = conversation.prompt = format_media_prompt(messages, prompt)
-                if action != "continue":
-                    data["parent_message_id"] = getattr(conversation, "parent_message_id", conversation.message_id)
-                    conversation.parent_message_id = None
-                    new_messages = messages
-                    if conversation.conversation_id is not None:
-                        new_messages = []
-                        for message in messages:
-                            if message.get("role") == "assistant":
-                                new_messages = []
-                            else:
-                                new_messages.append(message)
-                    data["messages"] = cls.create_messages(new_messages, image_requests,
-                                                           ["search"] if web_search else None)
-                yield JsonRequest.from_dict(data)
-                headers = {
-                    **cls._headers,
-                    "accept": "text/event-stream",
-                    "content-type": "application/json",
-                    "openai-sentinel-chat-requirements-token": chat_token,
-                    **({} if conduit_token is None else {"x-conduit-token": conduit_token})
-                }
-                # if cls.request_config.arkose_token:
-                #    headers["openai-sentinel-arkose-token"] = cls.request_config.arkose_token
-                if proofofwork is not None:
-                    headers["openai-sentinel-proof-token"] = proofofwork
-                if need_turnstile and getattr(auth_result, "turnstile_token", None) is not None:
-                    headers['openai-sentinel-turnstile-token'] = auth_result.turnstile_token
-                async with session.post(
-                        backend_anon_url
-                        if cls._api_key is None else
-                        backend_url,
-                        json=data,
-                        headers=headers
-                ) as response:
-                    cls._update_request_args(auth_result, session)
-                    if response.status in (401, 403, 429, 500):
-                        raise MissingAuthError("Access token is not valid")
-                    elif response.status == 422:
-                        raise RuntimeError((await response.json()), data)
-                    await raise_for_status(response)
-                    buffer = u""
-                    matches = []
-                    async for line in response.iter_lines():
-                        pattern = re.compile(r"file-service://[\w-]+")
-                        for match in pattern.finditer(line.decode(errors="ignore")):
-                            if match.group(0) in matches:
-                                continue
-                            matches.append(match.group(0))
-                            generated_image = await cls.get_generated_image(session, auth_result, match.group(0),
-                                                                            prompt)
-                            if generated_image is not None:
-                                yield generated_image
-                        async for chunk in cls.iter_messages_line(session, auth_result, line, conversation, sources,
-                                                                  references):
-                            if isinstance(chunk, str):
-                                chunk = chunk.replace("\ue203", "").replace("\ue204", "").replace("\ue206", "")
-                                buffer += chunk
-                                if buffer.find(u"\ue200") != -1:
-                                    if buffer.find(u"\ue201") != -1:
-                                        def sequence_replacer(match):
-                                            def citation_replacer(match: re.Match[str]):
-                                                ref_type = match.group(1)
-                                                ref_index = int(match.group(2))
-                                                if ((ref_type == "image" and is_image_embedding) or
-                                                        is_video_embedding or
-                                                        ref_type == "forecast"):
-
-                                                    reference = references.get_reference({
-                                                        "ref_index": ref_index,
-                                                        "ref_type": ref_type
-                                                    })
-                                                    if not reference:
-                                                        return ""
-
-                                                    if ref_type == "forecast":
-                                                        if reference.get("alt"):
-                                                            return reference.get("alt")
-                                                        if reference.get("prompt_text"):
-                                                            return reference.get("prompt_text")
-
-                                                    if is_image_embedding and reference.get("content_url", ""):
-                                                        return f"![{reference.get('title', '')}]({reference.get('content_url')})"
-
-                                                    if is_video_embedding:
-                                                        if reference.get("url", "") and reference.get("thumbnail_url",
-                                                                                                      ""):
-                                                            return f"[![{reference.get('title', '')}]({reference['thumbnail_url']})]({reference['url']})"
-                                                        video_match = re.match(r"video\n(.*?)\nturn[0-9]+",
-                                                                               match.group(0))
-                                                        if video_match:
-                                                            return video_match.group(1)
-                                                    return ""
-
-                                                source_index = sources.get_index({
-                                                    "ref_index": ref_index,
-                                                    "ref_type": ref_type
-                                                })
-                                                if source_index is not None and len(sources.list) > source_index:
-                                                    link = sources.list[source_index]["url"]
-                                                    return f"[[{source_index + 1}]]({link})"
-                                                return f""
-
-                                            def products_replacer(match: re.Match[str]):
-                                                try:
-                                                    products_data = json.loads(match.group(1))
-                                                    products_str = ""
-                                                    for idx, _ in enumerate(products_data.get("selections", []) or []):
-                                                        name = products_data.get('selections', [])[idx][1]
-                                                        tags = products_data.get('tags', [])[idx]
-                                                        products_str += f"{name} - {tags}\n\n"
-
-                                                    return products_str
-                                                except:
-                                                    return ""
-
-                                            sequence_content = match.group(1)
-                                            sequence_content = sequence_content.replace("\ue200", "").replace("\ue202",
-                                                                                                              "\n").replace(
-                                                "\ue201", "")
-                                            sequence_content = sequence_content.replace("navlist\n", "#### ")
-
-                                            # Handle search, news, view and image citations
-                                            is_image_embedding = sequence_content.startswith("i\nturn")
-                                            is_video_embedding = sequence_content.startswith("video\n")
-                                            sequence_content = re.sub(
-                                                r'(?:cite\nturn[0-9]+|forecast\nturn[0-9]+|video\n.*?\nturn[0-9]+|i?\n?turn[0-9]+)(search|news|view|image|forecast)(\d+)',
-                                                citation_replacer,
-                                                sequence_content
-                                            )
-                                            sequence_content = re.sub(r'products\n(.*)', products_replacer,
-                                                                      sequence_content)
-                                            sequence_content = re.sub(r'product_entity\n\[".*","(.*)"\]',
-                                                                      lambda x: x.group(1), sequence_content)
-                                            return sequence_content
-
-                                        # process only completed sequences and do not touch start of next not completed sequence
-                                        buffer = re.sub(r'\ue200(.*?)\ue201', sequence_replacer, buffer,
-                                                        flags=re.DOTALL)
-
-                                        if buffer.find(u"\ue200") != -1:  # still have uncompleted sequence
-                                            continue
-                                    else:
-                                        # do not yield to consume rest part of special sequence
-                                        continue
-
-                                yield buffer
-                                buffer = ""
-                            else:
-                                yield chunk
-                        if conversation.finish_reason is not None:
+                result = target
+            if not os.path.isfile(result):
+                return ErrorResponse.from_message("File not found", HTTP_404_NOT_FOUND)
+            async def stream():
+                with open(result, "rb") as file:
+                    while True:
+                        chunk = file.read(65536)
+                        if not chunk:
                             break
-                    if buffer:
-                        yield buffer
-                if sources.list:
-                    yield sources
-                if conversation.generated_images:
-                    yield ImageResponse(conversation.generated_images.urls, conversation.prompt,
-                                        {"headers": auth_result.headers})
-                    conversation.generated_images = None
-                conversation.prompt = None
-                if return_conversation:
-                    yield conversation
-                if auth_result.api_key is not None:
-                    yield SynthesizeData(cls.__name__, {
-                        "conversation_id": conversation.conversation_id,
-                        "message_id": conversation.message_id,
-                        "voice": "maple",
-                    })
-                if auto_continue and conversation.finish_reason == "max_tokens":
-                    conversation.finish_reason = None
-                    action = "continue"
-                    await asyncio.sleep(5)
-                else:
-                    break
+                        yield chunk
+            return StreamingResponse(stream(), headers=headers)
 
-            if conversation.task and kwargs.get("wait_media", True):
-                async for _m in cls.wss_media(session, conversation, auth_result.headers, auth_result):
-                    yield _m
-            # if kwargs.get("wait_media"):
-            #     async for _m in cls.wait_media(session, conversation, headers, auth_result):
-            #         yield _m
+        @self.app.get("/thumbnail/{filename}", responses={
+            HTTP_200_OK: {"content": {"image/*": {}, "audio/*": {}}, "video/*": {}},
+            HTTP_404_NOT_FOUND: {}
+        })
+        async def get_media_thumbnail(filename: str, request: Request):
+            return await get_media(filename, request, True)
 
-            yield FinishReason(conversation.finish_reason)
+def format_exception(e: Union[Exception, str], config: Union[ChatCompletionsConfig, ImageGenerationConfig] = None, image: bool = False) -> str:
+    last_provider = {}
+    provider = (AppConfig.media_provider if image else AppConfig.provider)
+    model = AppConfig.model
+    if config is not None:
+        if config.provider is not None:
+            provider = config.provider
+        if config.model is not None:
+            model = config.model
+    if isinstance(e, str):
+        message = e
+    else:
+        message = f"{e.__class__.__name__}: {e}"
+    return json.dumps({
+        "error": {"message": message},
+        **filter_none(
+            model=last_provider.get("model") if model is None else model,
+            provider=last_provider.get("name") if provider is None else provider
+        )
+    })
 
-    @classmethod
-    async def wss_media(
-            cls,
-            _session,
-            conversation: Conversation,
-            headers: Dict[str, str],
-            auth_result: AuthResult,
-            timeout: Optional[int] = 20,
-    ):
-        seen_assets: Set[str] = set()
-        async with AsyncSession(
-                timeout=timeout,
-                impersonate="chrome",
-                headers=headers,
-                cookies=auth_result.cookies
-        ) as session:
-            response = await session.get(
-                "https://chatgpt.com/backend-api/celsius/ws/user",
-                headers=headers,
-            )
-            response.raise_for_status()
-            websocket_url = response.json().get("websocket_url")
-            started = False
-            wss = await session.ws_connect(websocket_url, timeout=3)
-            while not wss.closed:
-                try:
-                    last_msg = await wss.recv_json(timeout=60 if not started else timeout)
-                except:
-                    break
-                conversation_id = conversation.task.get("conversation_id")
-                message_id = conversation.task.get("message", {}).get("id")
-                if isinstance(last_msg, dict) and last_msg.get("type") == "conversation-update":
-                    if last_msg.get("payload", {}).get("conversation_id") != conversation_id:
-                        continue
+def run_api(
+    host: str = '0.0.0.0',
+    port: int = None,
+    bind: str = None,
+    debug: bool = False,
+    use_colors: bool = None,
+    **kwargs
+) -> None:
+    print(f'Starting server... [g4f v-{g4f.version.utils.current_version}]' + (" (debug)" if debug else ""))
 
-                    message = last_msg.get("payload", {}).get("update_content", {}).get("message", {})
-                    if message.get("id") != message_id:
-                        continue
+    if use_colors is None:
+        use_colors = debug
 
-                    # if last_msg.get("payload", {}).get("update_type") == 'async-task-start':
-                    #     started = True
-                    started = True
-                    if last_msg.get("payload", {}).get("update_type") == 'async-task-update-message':
+    if bind is not None:
+        host, port = bind.split(":")
 
-                        status = message.get("status")
-                        parts = message.get("content").get("parts") or []
-                        for part in parts:
-                            if part.get("content_type") != "image_asset_pointer":
-                                continue
-                            asset = part.get("asset_pointer")
-                            if not asset or asset in seen_assets:
-                                continue
-                            seen_assets.add(asset)
-                            generated_images = await cls.get_generated_image(
-                                _session,
-                                auth_result,
-                                asset,
-                                conversation.prompt or "",
-                                conversation.conversation_id,
-                                status,
-                            )
-                            if generated_images is not None:
-                                yield generated_images
-                        if message.get("status") == "finished_successfully":
-                            await wss.close()
-                            return
+    if port is None:
+        port = DEFAULT_PORT
 
-    @classmethod
-    async def wait_media(
-            cls,
-            session,
-            conversation,
-            headers: Dict[str, str],
-            auth_result: AuthResult,
-            poll_interval: int = 10,
-            timeout: Optional[int] = None,
-    ) -> AsyncGenerator[Any, None]:
-        start_time = asyncio.get_event_loop().time()
-        seen_assets: Set[str] = set()
-        running = True
-        has_image_task = False
-        generation_started = False
+    if AppConfig.demo and debug:
+        method = "create_app_with_demo_and_debug"
+    elif AppConfig.gui and debug:
+        method = "create_app_with_gui_and_debug"
+    else:
+        method = "create_app_debug" if debug else "create_app"
 
-        while running:
-            if timeout is not None:
-                elapsed = asyncio.get_event_loop().time() - start_time
-                if elapsed > timeout:
-                    return
-            # https://chatgpt.com/backend-api/tasks
-            async with session.get(
-                    f"https://chatgpt.com/backend-api/conversation/{conversation.conversation_id}",
-                    headers=headers,
-            ) as response:
-                await raise_for_status(response)
-                data = await response.json()
-
-            mapping = data.get("mapping") or {}
-            if not mapping:
-                return
-
-            last_node = list(mapping.values())[-1] or {}
-            last_message = last_node.get("message") or {}
-            metadata = last_message.get("metadata") or {}
-            status = last_message.get("status")
-            image_task_id = metadata.get("image_gen_task_id")
-            if not has_image_task and not image_task_id:
-                return
-
-            if image_task_id and not has_image_task:
-                debug.log(f"OpenaiChat: Wait Task: {image_task_id}")
-                has_image_task = True
-            if status == "in_progress":
-                generation_started = True
-            elif generation_started and status == "finished_successfully":
-                running = False
-            if generation_started:
-                content = last_message.get("content") or {}
-                parts = content.get("parts") or []
-                for part in parts:
-                    if part.get("content_type") != "image_asset_pointer":
-                        continue
-                    asset = part.get("asset_pointer")
-                    if not asset or asset in seen_assets:
-                        continue
-                    seen_assets.add(asset)
-                    generated_images = await cls.get_generated_image(
-                        session,
-                        auth_result,
-                        asset,
-                        conversation.prompt
-                        or metadata.get("async_task_title")
-                        or "",
-                        conversation.conversation_id,
-                        status,
-                    )
-                    if generated_images is not None:
-                        yield generated_images
-            if generation_started and status == "finished_successfully":
-                return
-            await asyncio.sleep(poll_interval)
-
-    @classmethod
-    async def iter_messages_line(cls, session: StreamSession, auth_result: AuthResult, line: bytes,
-                                 fields: Conversation, sources: OpenAISources,
-                                 references: ContentReferences) -> AsyncIterator:
-        if not line.startswith(b"data: "):
-            return
-        elif line.startswith(b"data: [DONE]"):
-            return
-        try:
-            line = json.loads(line[6:])
-        except:
-            return
-        if not isinstance(line, dict):
-            return
-        if "type" in line:
-            if line["type"] == "title_generation":
-                yield TitleGeneration(line["title"])
-        fields.p = line.get("p", fields.p)
-        if fields.p is not None and fields.p.startswith("/message/content/thoughts"):
-            if fields.p.endswith("/content"):
-                if fields.thoughts_summary:
-                    yield Reasoning(token="", status=fields.thoughts_summary)
-                    fields.thoughts_summary = ""
-                yield Reasoning(token=line.get("v"))
-            elif fields.p.endswith("/summary"):
-                fields.thoughts_summary += line.get("v")
-            return
-        if "v" in line:
-            v = line.get("v")
-            if isinstance(v, str) and fields.recipient == "all":
-                if fields.p == "/message/metadata/refresh_key_info":
-                    yield ""
-                elif "p" not in line or line.get("p") == "/message/content/parts/0":
-                    yield Reasoning(token=v) if fields.is_thinking else v
-            elif isinstance(v, list):
-                buffer = ""
-                for m in v:
-                    if m.get("p") == "/message/content/parts/0" and fields.recipient == "all":
-                        buffer += m.get("v")
-                    elif m.get("p") == "/message/metadata/image_gen_title":
-                        fields.prompt = m.get("v")
-                    elif m.get("p") == "/message/content/parts/0/asset_pointer":
-                        status = next(filter(lambda x: x.get("p") == '/message/status', v), {}).get('v', None)
-                        generated_images = fields.generated_images = await cls.get_generated_image(session, auth_result,
-                                                                                                   m.get("v"),
-                                                                                                   fields.prompt,
-                                                                                                   fields.conversation_id,
-                                                                                                   status)
-                        if generated_images is not None:
-                            if buffer:
-                                yield buffer
-                            yield generated_images
-                    elif m.get("p") == "/message/metadata/search_result_groups":
-                        for entry in [p.get("entries") for p in m.get("v")]:
-                            for link in entry:
-                                sources.add_source(link)
-                    elif m.get("p") == "/message/metadata/content_references" and not isinstance(m.get("v"), int):
-                        for entry in m.get("v"):
-                            for link in entry.get("sources", []):
-                                sources.add_source(link)
-                            for link in entry.get("items", []):
-                                sources.add_source(link)
-                            for link in entry.get("fallback_items", []) or []:
-                                sources.add_source(link)
-                            if m.get("o", None) == "append":
-                                references.add_reference(entry)
-                    elif m.get("p") and re.match(r"^/message/metadata/content_references/\d+$", m.get("p")):
-                        if "url" in m.get("v") or "link" in m.get("v"):
-                            sources.add_source(m.get("v"))
-                        for link in m.get("v").get("fallback_items", []) or []:
-                            sources.add_source(link)
-
-                        match = re.match(r"^/message/metadata/content_references/(\d+)$", m.get("p"))
-                        if match and m.get("o") == "append" and isinstance(m.get("v"), dict):
-                            idx = int(match.group(1))
-                            references.merge_reference(idx, m.get("v"))
-                    elif m.get("p") and re.match(r"^/message/metadata/content_references/\d+/fallback_items$",
-                                                 m.get("p")) and isinstance(m.get("v"), list):
-                        for link in m.get("v", []) or []:
-                            sources.add_source(link)
-                    elif m.get("p") and re.match(r"^/message/metadata/content_references/\d+/items$",
-                                                 m.get("p")) and isinstance(m.get("v"), list):
-                        for link in m.get("v", []) or []:
-                            sources.add_source(link)
-                    elif m.get("p") and re.match(r"^/message/metadata/content_references/\d+/refs$",
-                                                 m.get("p")) and isinstance(m.get("v"), list):
-                        match = re.match(r"^/message/metadata/content_references/(\d+)/refs$", m.get("p"))
-                        if match:
-                            idx = int(match.group(1))
-                            references.update_reference(idx, m.get("o"), "refs", m.get("v"))
-                    elif m.get("p") and re.match(r"^/message/metadata/content_references/\d+/alt$",
-                                                 m.get("p")) and isinstance(m.get("v"), list):
-                        match = re.match(r"^/message/metadata/content_references/(\d+)/alt$", m.get("p"))
-                        if match:
-                            idx = int(match.group(1))
-                            references.update_reference(idx, m.get("o"), "alt", m.get("v"))
-                    elif m.get("p") and re.match(r"^/message/metadata/content_references/\d+/prompt_text$",
-                                                 m.get("p")) and isinstance(m.get("v"), list):
-                        match = re.match(r"^/message/metadata/content_references/(\d+)/prompt_text$", m.get("p"))
-                        if match:
-                            idx = int(match.group(1))
-                            references.update_reference(idx, m.get("o"), "prompt_text", m.get("v"))
-                    elif m.get("p") and re.match(r"^/message/metadata/content_references/\d+/refs/\d+$",
-                                                 m.get("p")) and isinstance(m.get("v"), dict):
-                        match = re.match(r"^/message/metadata/content_references/(\d+)/refs/(\d+)$", m.get("p"))
-                        if match:
-                            reference_idx = int(match.group(1))
-                            ref_idx = int(match.group(2))
-                            references.update_reference(reference_idx, m.get("o"), "refs", m.get("v"), ref_idx)
-                    elif m.get("p") and re.match(r"^/message/metadata/content_references/\d+/images$",
-                                                 m.get("p")) and isinstance(m.get("v"), list):
-                        match = re.match(r"^/message/metadata/content_references/(\d+)/images$", m.get("p"))
-                        if match:
-                            idx = int(match.group(1))
-                            references.update_reference(idx, m.get("o"), "images", m.get("v"))
-                    elif m.get("p") == "/message/metadata/finished_text":
-                        fields.is_thinking = False
-                        if buffer:
-                            yield buffer
-                        yield Reasoning(status=m.get("v"))
-                    elif m.get("p") == "/message/metadata" and fields.recipient == "all":
-                        fields.finish_reason = m.get("v", {}).get("finish_details", {}).get("type")
-                        break
-
-                yield buffer
-            elif isinstance(v, dict):
-                if fields.conversation_id is None:
-                    fields.conversation_id = v.get("conversation_id")
-                    debug.log(f"OpenaiChat: New conversation: {fields.conversation_id}")
-                m = v.get("message", {})
-                fields.recipient = m.get("recipient", fields.recipient)
-                if fields.recipient == "all":
-                    c = m.get("content", {})
-                    if c.get("content_type") == "text" and m.get("author", {}).get(
-                            "role") == "tool" and "initial_text" in m.get("metadata", {}):
-                        fields.is_thinking = True
-                        yield Reasoning(status=m.get("metadata", {}).get("initial_text"))
-                    # if c.get("content_type") == "multimodal_text":
-                    #    for part in c.get("parts"):
-                    #        if isinstance(part, dict) and part.get("content_type") == "image_asset_pointer":
-                    #            yield await cls.get_generated_image(session, auth_result, part, fields.prompt, fields.conversation_id)
-                    if m.get("author", {}).get("role") == "assistant":
-                        if fields.parent_message_id is None:
-                            fields.parent_message_id = v.get("message", {}).get("id")
-                        fields.message_id = v.get("message", {}).get("id")
-                    if m.get("status") == "finished_successfully" and m.get("metadata", {}).get("image_gen_task_id"):
-                        fields.task = v
-            return
-        if "error" in line and line.get("error"):
-            raise RuntimeError(line.get("error"))
-
-    @classmethod
-    async def synthesize(cls, params: dict) -> AsyncIterator[bytes]:
-        async with StreamSession(
-                impersonate="chrome",
-                timeout=0
-        ) as session:
-            async with session.get(
-                    f"{cls.url}/backend-api/synthesize",
-                    params=params,
-                    headers=cls._headers
-            ) as response:
-                await raise_for_status(response)
-                async for chunk in response.iter_content():
-                    yield chunk
-
-    @classmethod
-    async def login(
-            cls,
-            proxy: str = None,
-            api_key: str = None,
-            proof_token: str = None,
-            cookies: Cookies = None,
-            headers: dict = None,
-            **kwargs
-    ) -> AsyncIterator:
-        if cls._expires is not None and (cls._expires - 60 * 10) < time.time():
-            cls._headers = cls._api_key = None
-        if cls._headers is None or headers is not None:
-            cls._headers = {} if headers is None else headers
-        if proof_token is not None:
-            cls.request_config.proof_token = proof_token
-        if cookies is not None:
-            cls.request_config.cookies = cookies
-        if api_key is not None:
-            cls._create_request_args(cls.request_config.cookies, cls.request_config.headers)
-            cls._set_api_key(api_key)
-        else:
-            try:
-                cls.request_config = await get_request_config(cls.request_config, proxy)
-                if cls.request_config is None:
-                    cls.request_config = RequestConfig()
-                cls._create_request_args(cls.request_config.cookies, cls.request_config.headers)
-                if cls.needs_auth and cls.request_config.access_token is None:
-                    raise NoValidHarFileError(f"Missing access token")
-                if not cls._set_api_key(cls.request_config.access_token):
-                    raise NoValidHarFileError(f"Access token is not valid: {cls.request_config.access_token}")
-            except NoValidHarFileError:
-                if has_nodriver:
-                    if cls.request_config.access_token is None:
-                        yield RequestLogin(cls.label, os.environ.get("G4F_LOGIN_URL", ""))
-                        await cls.nodriver_auth(proxy)
-                else:
-                    raise
-
-    @classmethod
-    async def nodriver_auth(cls, proxy: str = None):
-        async with get_nodriver_session(proxy=proxy) as browser:
-            page = await browser.get(cls.url)
-
-            def on_request(event: nodriver.cdp.network.RequestWillBeSent, page=None):
-                if event.request.url == start_url or event.request.url.startswith(conversation_url):
-                    if cls.request_config.headers is None:
-                        cls.request_config.headers = {}
-                    for key, value in event.request.headers.items():
-                        cls.request_config.headers[key.lower()] = value
-                elif event.request.url in (backend_url, backend_anon_url):
-                    if "OpenAI-Sentinel-Proof-Token" in event.request.headers:
-                        cls.request_config.proof_token = json.loads(base64.b64decode(
-                            event.request.headers["OpenAI-Sentinel-Proof-Token"].split("gAAAAAB", 1)[-1].split("~")[
-                                0].encode()
-                        ).decode())
-                    if "OpenAI-Sentinel-Turnstile-Token" in event.request.headers:
-                        cls.request_config.turnstile_token = event.request.headers["OpenAI-Sentinel-Turnstile-Token"]
-                    if "Authorization" in event.request.headers:
-                        cls._api_key = event.request.headers["Authorization"].split()[-1]
-                elif event.request.url == arkose_url:
-                    cls.request_config.arkose_request = arkReq(
-                        arkURL=event.request.url,
-                        arkBx=None,
-                        arkHeader=event.request.headers,
-                        arkBody=event.request.post_data,
-                        userAgent=event.request.headers.get("User-Agent")
-                    )
-
-            await page.send(nodriver.cdp.network.enable())
-            page.add_handler(nodriver.cdp.network.RequestWillBeSent, on_request)
-            await page.reload()
-            user_agent = await page.evaluate("window.navigator.userAgent", return_by_value=True)
-            debug.log(f"OpenaiChat: User-Agent: {user_agent}")
-            for _ in range(3):
-                try:
-                    if cls.needs_auth:
-                        await page.select('[data-testid="accounts-profile-button"]', 300)
-                    textarea = await page.select("#prompt-textarea", 300)
-                    await textarea.send_keys("Hello")
-                    await asyncio.sleep(1)
-                except nodriver.core.connection.ProtocolException:
-                    continue
-                break
-            button = await page.select("[data-testid=\"send-button\"]")
-            if button:
-                await button.click()
-            debug.log("OpenaiChat: 'Hello' sended")
-            while True:
-                body = await page.evaluate("JSON.stringify(window.__remixContext)", return_by_value=True)
-                if hasattr(body, "value"):
-                    body = body.value
-                if body:
-                    match = re.search(r'"accessToken":"(.+?)"', body)
-                    if match:
-                        cls._api_key = match.group(1)
-                        break
-                if cls._api_key is not None or not cls.needs_auth:
-                    break
-                await asyncio.sleep(1)
-            debug.log(f"OpenaiChat: Access token: {'False' if cls._api_key is None else cls._api_key[:12] + '...'}")
-            while True:
-                if cls.request_config.proof_token:
-                    break
-                await asyncio.sleep(1)
-            debug.log(f"OpenaiChat: Proof token: Yes")
-            cls.request_config.data_build = await page.evaluate("document.documentElement.getAttribute('data-build')")
-            cls.request_config.cookies = await page.send(get_cookies([cls.url]))
-            await page.close()
-            cls._create_request_args(cls.request_config.cookies, cls.request_config.headers, user_agent=user_agent)
-            cls._set_api_key(cls._api_key)
-            debug.log(f"OpenaiChat: Sleep 10s")
-            await asyncio.sleep(10)
-
-    @staticmethod
-    def get_default_headers() -> Dict[str, str]:
-        return {
-            **DEFAULT_HEADERS,
-            "content-type": "application/json",
-        }
-
-    @classmethod
-    def _create_request_args(cls, cookies: Cookies = None, headers: dict = None, user_agent: str = None):
-        cls._headers = cls.get_default_headers() if headers is None else headers
-        if user_agent is not None:
-            cls._headers["user-agent"] = user_agent
-        cls._cookies = {} if cookies is None else cookies
-        cls._update_cookie_header()
-
-    @classmethod
-    def _update_request_args(cls, auth_result: AuthResult, session: StreamSession):
-        if hasattr(auth_result, "cookies"):
-            for c in session.cookie_jar if hasattr(session, "cookie_jar") else session.cookies.jar:
-                auth_result.cookies[getattr(c, "key", getattr(c, "name", ""))] = c.value
-            cls._cookies = auth_result.cookies
-        cls._update_cookie_header()
-
-    @classmethod
-    def _set_api_key(cls, api_key: str):
-        cls._api_key = api_key
-        if api_key:
-            exp = api_key.split(".")[1]
-            exp = (exp + "=" * (4 - len(exp) % 4)).encode()
-            cls._expires = json.loads(base64.b64decode(exp)).get("exp")
-            debug.log(f"OpenaiChat: API key expires at\n {cls._expires} we have:\n {time.time()}")
-            if time.time() > cls._expires:
-                debug.log(f"OpenaiChat: API key is expired")
-                return False
-            else:
-                cls._headers["authorization"] = f"Bearer {api_key}"
-                return True
-        return True
-
-    @classmethod
-    def _update_cookie_header(cls):
-        if cls._cookies:
-            cls._headers["cookie"] = format_cookies(cls._cookies)
-
-
-class Conversation(JsonConversation):
-    """
-    Class to encapsulate response fields.
-    """
-
-    def __init__(self, conversation_id: str = None, message_id: str = None, user_id: str = None,
-                 finish_reason: str = None, parent_message_id: str = None, is_thinking: bool = False):
-        self.conversation_id = conversation_id
-        self.message_id = message_id
-        self.finish_reason = finish_reason
-        self.recipient = "all"
-        self.parent_message_id = message_id if parent_message_id is None else parent_message_id
-        self.user_id = user_id
-        self.is_thinking = is_thinking
-        self.p = None
-        self.thoughts_summary = ""
-        self.prompt = None
-        self.generated_images: ImagePreview = None
-        self.task: dict = None
-
-
-def get_cookies(
-        urls: Optional[Iterator[str]] = None
-) -> Generator[Dict, Dict, Dict[str, str]]:
-    params = {}
-    if urls is not None:
-        params['urls'] = [i for i in urls]
-    cmd_dict = {
-        'method': 'Network.getCookies',
-        'params': params,
-    }
-    json = yield cmd_dict
-    return {c["name"]: c["value"] for c in json['cookies']} if 'cookies' in json else {}
-
-
-class OpenAISources(ResponseType):
-    list: List[Dict[str, str]]
-
-    def __init__(self, sources: List[Dict[str, str]]) -> None:
-        """Initialize with a list of source dictionaries."""
-        self.list = []
-        for source in sources:
-            self.add_source(source)
-
-    def add_source(self, source: Union[Dict[str, str], str]) -> None:
-        """Add a source to the list, cleaning the URL if necessary."""
-        source = source if isinstance(source, dict) else {"url": source}
-        url = source.get("url", source.get("link", None))
-        if not url:
-            return
-
-        url = re.sub(r"[&?]utm_source=.+", "", url)
-        source["url"] = url
-
-        ref_info = self.get_ref_info(source)
-        if ref_info:
-            existing_source, idx = self.find_by_ref_info(ref_info)
-            if existing_source and idx is not None:
-                self.list[idx] = source
-                return
-
-        existing_source, idx = self.find_by_url(source["url"])
-        if existing_source and idx is not None:
-            self.list[idx] = source
-            return
-
-        self.list.append(source)
-
-    def __str__(self) -> str:
-        """Return formatted sources as a string."""
-        if not self.list:
-            return ""
-        return "\n\n\n\n" + ("\n>\n".join([
-            f"> [{idx + 1}] {format_link(link['url'], link.get('title', ''))}"
-            for idx, link in enumerate(self.list)
-        ]))
-
-    def get_ref_info(self, source: Dict[str, str]) -> dict[str, str | int] | None:
-        ref_index = source.get("ref_id", {}).get("ref_index", None)
-        ref_type = source.get("ref_id", {}).get("ref_type", None)
-        if isinstance(ref_index, int):
-            return {
-                "ref_index": ref_index,
-                "ref_type": ref_type,
-            }
-
-        for ref_info in source.get('refs') or []:
-            ref_index = ref_info.get("ref_index", None)
-            ref_type = ref_info.get("ref_type", None)
-            if isinstance(ref_index, int):
-                return {
-                    "ref_index": ref_index,
-                    "ref_type": ref_type,
-                }
-
-        return None
-
-    def find_by_ref_info(self, ref_info: dict[str, str | int]):
-        for idx, source in enumerate(self.list):
-            source_ref_info = self.get_ref_info(source)
-            if (source_ref_info and
-                    source_ref_info["ref_index"] == ref_info["ref_index"] and
-                    source_ref_info["ref_type"] == ref_info["ref_type"]):
-                return source, idx
-
-        return None, None
-
-    def find_by_url(self, url: str):
-        for idx, source in enumerate(self.list):
-            if source["url"] == url:
-                return source, idx
-        return None, None
-
-    def get_index(self, ref_info: dict[str, str | int]) -> int | None:
-        _, index = self.find_by_ref_info(ref_info)
-        if index is not None:
-            return index
-
-        return None
-
-
-class ContentReferences:
-    def __init__(self) -> None:
-        self.list: List[Dict[str, Any]] = []
-
-    def add_reference(self, reference_part: dict) -> None:
-        self.list.append(reference_part)
-
-    def merge_reference(self, idx: int, reference_part: dict):
-        while len(self.list) <= idx:
-            self.list.append({})
-
-        self.list[idx] = {**self.list[idx], **reference_part}
-
-    def update_reference(self, idx: int, operation: str, field: str, value: Any, ref_idx=None) -> None:
-        while len(self.list) <= idx:
-            self.list.append({})
-
-        if operation == "append" or operation == "add":
-            if not isinstance(self.list[idx].get(field, None), list):
-                self.list[idx][field] = []
-            if isinstance(value, list):
-                self.list[idx][field].extend(value)
-            else:
-                self.list[idx][field].append(value)
-
-        if operation == "replace" and ref_idx is not None:
-            if field == "refs" and not isinstance(self.list[idx].get(field, None), list):
-                self.list[idx][field] = []
-
-            if isinstance(self.list[idx][field], list):
-                if len(self.list[idx][field]) <= ref_idx:
-                    self.list[idx][field].append(value)
-                else:
-                    self.list[idx][field][ref_idx] = value
-            else:
-                self.list[idx][field] = value
-
-    def get_ref_info(
-            self,
-            source: Dict[str, str],
-            target_ref_info: Dict[str, Union[str, int]]
-    ) -> dict[str, str | int] | None:
-        for idx, ref_info in enumerate(source.get("refs", [])) or []:
-            if not isinstance(ref_info, dict):
-                continue
-
-            ref_index = ref_info.get("ref_index", None)
-            ref_type = ref_info.get("ref_type", None)
-            if isinstance(ref_index, int) and isinstance(ref_type, str):
-                if (not target_ref_info or
-                        (target_ref_info["ref_index"] == ref_index and
-                         target_ref_info["ref_type"] == ref_type)):
-                    return {
-                        "ref_index": ref_index,
-                        "ref_type": ref_type,
-                        "idx": idx
-                    }
-
-        return None
-
-    def get_reference(self, ref_info: Dict[str, Union[str, int]]) -> Any:
-        for reference in self.list:
-            reference_ref_info = self.get_ref_info(reference, ref_info)
-
-            if (not reference_ref_info or
-                    reference_ref_info["ref_index"] != ref_info["ref_index"] or
-                    reference_ref_info["ref_type"] != ref_info["ref_type"]):
-                continue
-
-            if ref_info["ref_type"] != "image":
-                return reference
-
-            images = reference.get("images", [])
-            if isinstance(images, list) and len(images) > reference_ref_info["idx"]:
-                return images[reference_ref_info["idx"]]
-
-        return None
+    uvicorn.run(
+        f"g4f.api:{method}",
+        host=host,
+        port=int(port),
+        factory=True,
+        use_colors=use_colors,
+        **filter_none(**kwargs)
+    )
