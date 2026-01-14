@@ -430,7 +430,7 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                 image_model = True
                 model = cls.default_model
             if conversation is None:
-                conversation = Conversation(None, str(uuid.uuid4()), getattr(auth_result, "cookies", {}).get("oai-did"))
+                conversation = Conversation(conversation_id, str(uuid.uuid4()), getattr(auth_result, "cookies", {}).get("oai-did"))
             else:
                 conversation = copy(conversation)
 
