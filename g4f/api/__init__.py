@@ -493,7 +493,7 @@ class Api:
                             "proxy": AppConfig.proxy,
                             **(config.model_dump(exclude_none=True) if hasattr(config, "model_dump") else config.dict(exclude_none=True)),
                             **{
-                                "conversation_id": None,
+                                "conversation_id": config.conversation_id,
                                 "conversation": conversation,
                                 "user": x_user,
                             }
