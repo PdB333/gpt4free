@@ -27,12 +27,12 @@ from .. import debug
 SAFE_PARAMETERS = [
     "model", "messages", "stream", "timeout",
     "proxy", "media", "response_format",
-    "prompt", "negative_prompt", "tools", "conversation",
+    "prompt", "negative_prompt", "tools", "conversation", "conversation_id",
     "history_disabled",
     "temperature",  "top_k", "top_p",
     "frequency_penalty", "presence_penalty",
     "max_tokens", "stop",
-    "api_key", "base_url", "seed", "width", "height",
+    "api_key", "api_base", "seed", "width", "height",
     "max_retries", "web_search", "cache",
     "guidance_scale", "num_inference_steps", "randomize_seed",
     "safe", "enhance", "private", "aspect_ratio", "n", "transparent"
@@ -352,9 +352,12 @@ class AsyncGeneratorProvider(AbstractProvider):
         if "stream_timeout" in kwargs or "timeout" in kwargs:
             while True:
                 try:
+                    timeout = kwargs.get("stream_timeout") if cls.use_stream_timeout else kwargs.get("timeout")
+                    if not timeout or timeout < 600:
+                        timeout = 600
                     yield await asyncio.wait_for(
                         response.__anext__(),
-                        timeout=kwargs.get("stream_timeout") if cls.use_stream_timeout else kwargs.get("timeout")
+                        timeout=timeout
                     )
                 except StopAsyncIteration:
                     break
@@ -401,6 +404,10 @@ class ProviderModelMixin:
                 return selected_model
             debug.log(f"{cls.__name__}: Using model '{alias}' for alias '{model}'")
             return alias
+        if model not in cls.model_aliases.values():
+            if model not in cls.get_models(**kwargs) and cls.models:
+                raise ModelNotFoundError(f"Model not found: {model} in: {cls.__name__} Valid models: {cls.models}")
+        cls.last_model = model
         return model
 
 class RaiseErrorMixin():
@@ -524,9 +531,12 @@ class AsyncAuthedProvider(AsyncGeneratorProvider, AuthFileMixin):
             if "stream_timeout" in kwargs or "timeout" in kwargs:
                 while True:
                     try:
+                    timeout = kwargs.get("stream_timeout") if cls.use_stream_timeout else kwargs.get("timeout")
+                    if not timeout or timeout < 600:
+                        timeout = 600
                         yield await asyncio.wait_for(
                             response.__anext__(),
-                            timeout=kwargs.get("stream_timeout") if cls.use_stream_timeout else kwargs.get("timeout")
+                        timeout=timeout
                         )
                     except StopAsyncIteration:
                         break
