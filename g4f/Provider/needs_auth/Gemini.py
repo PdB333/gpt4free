@@ -31,6 +31,7 @@ from ...cookies import get_cookies_dir
 from ...tools.media import merge_media
 from ..base_provider import AsyncGeneratorProvider, ProviderModelMixin
 from ..helper import format_prompt, get_cookies, get_last_user_message, format_media_prompt
+from ... import debug
 
 REQUEST_HEADERS = {
     "authority": "gemini.google.com",
@@ -98,11 +99,11 @@ class Gemini(AsyncGeneratorProvider, ProviderModelMixin):
     _cookies: Cookies = None
     _snlm0e: str = None
     _sid: str = None
+    _conversations: dict = {}
 
     auto_refresh = True
     refresh_interval = 540
     rotate_tasks = {}
-    conversations: dict = {}
 
     @classmethod
     async def nodriver_login(cls, proxy: str = None) -> AsyncIterator[str]:
@@ -147,6 +148,13 @@ class Gemini(AsyncGeneratorProvider, ProviderModelMixin):
             await asyncio.sleep(cls.refresh_interval)
 
     @classmethod
+    def get_conversation_key(cls, messages: Messages) -> str:
+        return json.dumps([
+            {"role": m.get("role"), "content": m.get("content") if isinstance(m.get("content"), list) else (m.get("content") or "").strip()}
+            for m in messages
+        ], sort_keys=True)
+
+    @classmethod
     async def create_async_generator(
         cls,
         model: str,
@@ -162,6 +170,8 @@ class Gemini(AsyncGeneratorProvider, ProviderModelMixin):
         audio: dict = None,
         **kwargs
     ) -> AsyncResult:
+        original_messages = [m.copy() for m in messages]
+        media = merge_media(media, messages)
         if model in cls.model_aliases:
             model = cls.model_aliases[model]
         if audio is not None or model == "gemini-audio":
@@ -174,17 +184,13 @@ class Gemini(AsyncGeneratorProvider, ProviderModelMixin):
                     f.write(chunk)
             yield AudioResponse(f"/media/{filename}", text=prompt)
             return
-        
-        conversation_id = kwargs.get("conversation_id")
-        if isinstance(conversation, dict):
-            conversation_id = conversation.get("conversation_id")
-            conversation = None
-
-        conversation_key = f"{conversation_id}:{model}" if conversation_id else None
-        if conversation is None and conversation_key and conversation_key in cls.conversations:
-            conversation = cls.conversations[conversation_key]
-
         cls._cookies = cookies or cls._cookies or get_cookies(GOOGLE_COOKIE_DOMAIN, False, True)
+
+        if conversation is None:
+            conversation_key = cls.get_conversation_key(original_messages[:-1])
+            if conversation_key in cls._conversations:
+                conversation = cls._conversations[conversation_key]
+
         if conversation is not None and getattr(conversation, "model", None) != model:
             conversation = None
         prompt = format_prompt(messages) if conversation is None else get_last_user_message(messages)
@@ -215,7 +221,7 @@ class Gemini(AsyncGeneratorProvider, ProviderModelMixin):
                         cls.start_auto_refresh()
                     )
 
-            uploads = await cls.upload_images(base_connector, merge_media(media, messages))
+            uploads = await cls.upload_images(base_connector, media)
             async with ClientSession(
                 cookies=cls._cookies,
                 headers=REQUEST_HEADERS,
@@ -248,6 +254,7 @@ class Gemini(AsyncGeneratorProvider, ProviderModelMixin):
                     image_prompt = response_part = None
                     last_content = ""
                     youtube_ids = []
+                    conversation_obj = None
                     while True:
                         line = await response.content.readline()
                         if not line:
@@ -268,10 +275,8 @@ class Gemini(AsyncGeneratorProvider, ProviderModelMixin):
                             if not response_part[4]:
                                 continue
                             if return_conversation:
-                                conv = Conversation(response_part[1][0], response_part[1][1], response_part[4][0][0], model)
-                                if conversation_key:
-                                    cls.conversations[conversation_key] = conv
-                                yield conv
+                                conversation_obj = Conversation(response_part[1][0], response_part[1][1], response_part[4][0][0], model)
+                                yield conversation_obj
                             def find_youtube_ids(content: str):
                                 pattern = re.compile(r"http://www.youtube.com/watch\?v=([\w-]+)")
                                 for match in pattern.finditer(content):
@@ -332,6 +337,9 @@ class Gemini(AsyncGeneratorProvider, ProviderModelMixin):
                         youtube_ids = youtube_ids if youtube_ids else find_youtube_ids(content)
                         if youtube_ids:
                             yield YouTubeResponse(youtube_ids)
+
+                    if conversation_obj:
+                        cls._conversations[cls.get_conversation_key(original_messages + [{"role": "assistant", "content": last_content.strip()}])] = conversation_obj
 
     @classmethod
     async def synthesize(cls, params: dict, proxy: str = None) -> AsyncIterator[bytes]:
@@ -403,6 +411,20 @@ class Gemini(AsyncGeneratorProvider, ProviderModelMixin):
                 connector=connector
             ) as session:
                 image = to_bytes(image)
+
+                if not image_name:
+                    image_name = "image.png"
+                if not any(image_name.lower().endswith(ext) for ext in [".jpg", ".jpeg", ".png", ".webp", ".gif"]):
+                    if image.startswith(b"\xFF\xD8"):
+                        image_name += ".jpg"
+                    elif image.startswith(b"\x89PNG\r\n\x1a\n"):
+                        image_name += ".png"
+                    elif image.startswith(b"GIF8"):
+                        image_name += ".gif"
+                    elif image.startswith(b"RIFF") and b"WEBP" in image[8:12]:
+                        image_name += ".webp"
+                    else:
+                        image_name += ".png"
 
                 async with session.options(UPLOAD_IMAGE_URL) as response:
                     await raise_for_status(response)
