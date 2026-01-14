@@ -493,7 +493,7 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                             "picture_v2"
                         ] if image_model else [],
                         "thinking_effort": "extended" if reasoning_effort == "high" else "standard",
-                        "supports_buffering": True,
+                        "supports_buffering": False,
                         "supported_encodings": ["v1"]
                     }
                     if temporary:
@@ -554,7 +554,7 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                     "enable_message_followups": True,
                     "system_hints": ["search"] if web_search else None,
                     "thinking_effort": "extended" if reasoning_effort == "high" else "standard",
-                    "supports_buffering": True,
+                    "supports_buffering": False,
                     "supported_encodings": ["v1"],
                     "client_contextual_info": {"is_dark_mode": False, "time_since_loaded": random.randint(20, 500),
                                                "page_height": 578, "page_width": 1850, "pixel_ratio": 1,
