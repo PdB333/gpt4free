@@ -104,9 +104,6 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
     working = True
     active_by_default = True
     use_nodriver = True
-    # Image uploads can take longer than the default stream timeout, so rely on the
-    # longer provider timeout instead of the short streaming deadline.
-    use_stream_timeout = False
     image_cache = True
     supports_gpt_4 = True
     supports_message_history = True
@@ -124,18 +121,6 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
     _headers: dict = None
     _cookies: Cookies = None
     _expires: int = None
-    _conversation_cache: dict = {}
-    _last_conversation: Conversation | None = None
-
-    @classmethod
-    def _get_conversation_key(cls, auth_result: AuthResult, conversation_id: str | None = None):
-        cookies = getattr(auth_result, "cookies", None) or cls._cookies or {}
-        api_key = getattr(auth_result, "api_key", None) or cls._api_key
-        base_key = cookies.get("oai-did") or api_key
-        key = (conversation_id, base_key) if conversation_id is not None else base_key
-        if isinstance(key, str):
-            key = key.strip()
-        return key
 
     @classmethod
     async def on_auth_async(cls, proxy: str = None, **kwargs) -> AsyncIterator:
@@ -444,35 +429,19 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
             if model in cls.image_models:
                 image_model = True
                 model = cls.default_model
-            cookies = getattr(auth_result, "cookies", None) or cls._cookies or {}
-            conversation_key = cls._get_conversation_key(auth_result, conversation_id)
-            base_conversation_key = cls._get_conversation_key(auth_result)
-            if conversation is None and conversation_key:
-                conversation = cls._conversation_cache.get(conversation_key)
-
-            if conversation is not None and conversation_id is None:
-                last_assistant_msg = next((m["content"] for m in reversed(messages) if m["role"] == "assistant"), None)
-                if last_assistant_msg:
-                    cached_response = getattr(conversation, "response_text", "")
-                    if not cached_response or to_string(last_assistant_msg).strip() not in cached_response:
-                        conversation = None
-                else:
-                    conversation = None
-
-            if conversation is None and cls._last_conversation is not None and conversation_id is None:
-                conversation = cls._last_conversation
-
             if conversation is None:
-                conversation = Conversation(None, str(uuid.uuid4()), cookies.get("oai-did"))
+                conversation = Conversation(conversation_id, str(uuid.uuid4()), getattr(auth_result, "cookies", {}).get("oai-did"))
             else:
                 conversation = copy(conversation)
-            conversation.response_text = ""
 
             if conversation_mode is None:
                 conversation_mode = {"kind": "primary_assistant"}
 
-            if cookies.get("oai-did") and cookies.get("oai-did") != getattr(conversation, "user_id", None):
-                conversation = Conversation(None, str(uuid.uuid4()), cookies.get("oai-did"))
+            if getattr(auth_result, "cookies", {}).get("oai-did") != getattr(conversation, "user_id", None):
+                if getattr(conversation, "user_id", None) is None:
+                    conversation.user_id = getattr(auth_result, "cookies", {}).get("oai-did")
+                else:
+                    conversation = Conversation(None, str(uuid.uuid4()), getattr(auth_result, "cookies", {}).get("oai-did"))
             if cls._api_key is None:
                 auto_continue = False
             conversation.finish_reason = None
@@ -493,7 +462,7 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                             "picture_v2"
                         ] if image_model else [],
                         "thinking_effort": "extended" if reasoning_effort == "high" else "standard",
-                        "supports_buffering": False,
+                        "supports_buffering": True,
                         "supported_encodings": ["v1"]
                     }
                     if temporary:
@@ -554,7 +523,7 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                     "enable_message_followups": True,
                     "system_hints": ["search"] if web_search else None,
                     "thinking_effort": "extended" if reasoning_effort == "high" else "standard",
-                    "supports_buffering": False,
+                    "supports_buffering": True,
                     "supported_encodings": ["v1"],
                     "client_contextual_info": {"is_dark_mode": False, "time_since_loaded": random.randint(20, 500),
                                                "page_height": 578, "page_width": 1850, "pixel_ratio": 1,
@@ -610,123 +579,117 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                     await raise_for_status(response)
                     buffer = u""
                     matches = []
-                    try:
-                        async for line in response.iter_lines():
-                            pattern = re.compile(r"file-service://[\w-]+")
-                            for match in pattern.finditer(line.decode(errors="ignore")):
-                                if match.group(0) in matches:
-                                    continue
-                                matches.append(match.group(0))
-                                generated_image = await cls.get_generated_image(session, auth_result, match.group(0),
-                                                                                prompt)
-                                if generated_image is not None:
-                                    yield generated_image
-                            async for chunk in cls.iter_messages_line(session, auth_result, line, conversation, sources,
-                                                                      references):
-                                if isinstance(chunk, str):
-                                    chunk = chunk.replace("\ue203", "").replace("\ue204", "").replace("\ue206", "")
-                                    buffer += chunk
-                                    if buffer.find(u"\ue200") != -1:
-                                        if buffer.find(u"\ue201") != -1:
-                                            def sequence_replacer(match):
-                                                def citation_replacer(match: re.Match[str]):
-                                                    ref_type = match.group(1)
-                                                    ref_index = int(match.group(2))
-                                                    if ((ref_type == "image" and is_image_embedding) or
-                                                            is_video_embedding or
-                                                            ref_type == "forecast"):
+                    async for line in response.iter_lines():
+                        pattern = re.compile(r"file-service://[\w-]+")
+                        for match in pattern.finditer(line.decode(errors="ignore")):
+                            if match.group(0) in matches:
+                                continue
+                            matches.append(match.group(0))
+                            generated_image = await cls.get_generated_image(session, auth_result, match.group(0),
+                                                                            prompt)
+                            if generated_image is not None:
+                                yield generated_image
+                        async for chunk in cls.iter_messages_line(session, auth_result, line, conversation, sources,
+                                                                  references):
+                            if isinstance(chunk, str):
+                                chunk = chunk.replace("\ue203", "").replace("\ue204", "").replace("\ue206", "")
+                                buffer += chunk
+                                if buffer.find(u"\ue200") != -1:
+                                    if buffer.find(u"\ue201") != -1:
+                                        def sequence_replacer(match):
+                                            def citation_replacer(match: re.Match[str]):
+                                                ref_type = match.group(1)
+                                                ref_index = int(match.group(2))
+                                                if ((ref_type == "image" and is_image_embedding) or
+                                                        is_video_embedding or
+                                                        ref_type == "forecast"):
 
-                                                        reference = references.get_reference({
-                                                            "ref_index": ref_index,
-                                                            "ref_type": ref_type
-                                                        })
-                                                        if not reference:
-                                                            return ""
-
-                                                        if ref_type == "forecast":
-                                                            if reference.get("alt"):
-                                                                return reference.get("alt")
-                                                            if reference.get("prompt_text"):
-                                                                return reference.get("prompt_text")
-
-                                                        if is_image_embedding and reference.get("content_url", ""):
-                                                            return f"![{reference.get('title', '')}]({reference.get('content_url')})"
-
-                                                        if is_video_embedding:
-                                                            if reference.get("url", "") and reference.get("thumbnail_url",
-                                                                                                              ""):
-                                                                return f"[![{reference.get('title', '')}]({reference['thumbnail_url']})]({reference['url']})"
-                                                            video_match = re.match(r"video\n(.*?)\nturn[0-9]+",
-                                                                                   match.group(0))
-                                                            if video_match:
-                                                                return video_match.group(1)
-                                                        return ""
-
-                                                    source_index = sources.get_index({
+                                                    reference = references.get_reference({
                                                         "ref_index": ref_index,
                                                         "ref_type": ref_type
                                                     })
-                                                    if source_index is not None and len(sources.list) > source_index:
-                                                        link = sources.list[source_index]["url"]
-                                                        return f"[[{source_index + 1}]]({link})"
-                                                    return f""
-
-                                                def products_replacer(match: re.Match[str]):
-                                                    try:
-                                                        products_data = json.loads(match.group(1))
-                                                        products_str = ""
-                                                        for idx, _ in enumerate(products_data.get("selections", []) or []):
-                                                            name = products_data.get('selections', [])[idx][1]
-                                                            tags = products_data.get('tags', [])[idx]
-                                                            products_str += f"{name} - {tags}\n\n"
-
-                                                        return products_str
-                                                    except:
+                                                    if not reference:
                                                         return ""
 
-                                                sequence_content = match.group(1)
-                                                sequence_content = sequence_content.replace("\ue200", "").replace("\ue202",
-                                                                                                                  "\n").replace(
-                                                    "\ue201", "")
-                                                sequence_content = sequence_content.replace("navlist\n", "#### ")
+                                                    if ref_type == "forecast":
+                                                        if reference.get("alt"):
+                                                            return reference.get("alt")
+                                                        if reference.get("prompt_text"):
+                                                            return reference.get("prompt_text")
 
-                                                # Handle search, news, view and image citations
-                                                is_image_embedding = sequence_content.startswith("i\nturn")
-                                                is_video_embedding = sequence_content.startswith("video\n")
-                                                sequence_content = re.sub(
-                                                    r'(?:cite\nturn[0-9]+|forecast\nturn[0-9]+|video\n.*?\nturn[0-9]+|i?\n?turn[0-9]+)(search|news|view|image|forecast)(\d+)',
-                                                    citation_replacer,
-                                                    sequence_content
-                                                )
-                                                sequence_content = re.sub(r'products\n(.*)', products_replacer,
-                                                                          sequence_content)
-                                                sequence_content = re.sub(r'product_entity\n\[".*","(.*)"\]',
-                                                                          lambda x: x.group(1), sequence_content)
-                                                return sequence_content
+                                                    if is_image_embedding and reference.get("content_url", ""):
+                                                        return f"![{reference.get('title', '')}]({reference.get('content_url')})"
 
-                                            # process only completed sequences and do not touch start of next not completed sequence
-                                            buffer = re.sub(r'\ue200(.*?)\ue201', sequence_replacer, buffer,
-                                                            flags=re.DOTALL)
+                                                    if is_video_embedding:
+                                                        if reference.get("url", "") and reference.get("thumbnail_url",
+                                                                                                      ""):
+                                                            return f"[![{reference.get('title', '')}]({reference['thumbnail_url']})]({reference['url']})"
+                                                        video_match = re.match(r"video\n(.*?)\nturn[0-9]+",
+                                                                               match.group(0))
+                                                        if video_match:
+                                                            return video_match.group(1)
+                                                    return ""
 
-                                            if buffer.find(u"\ue200") != -1:  # still have uncompleted sequence
-                                                continue
-                                        else:
-                                            # do not yield to consume rest part of special sequence
+                                                source_index = sources.get_index({
+                                                    "ref_index": ref_index,
+                                                    "ref_type": ref_type
+                                                })
+                                                if source_index is not None and len(sources.list) > source_index:
+                                                    link = sources.list[source_index]["url"]
+                                                    return f"[[{source_index + 1}]]({link})"
+                                                return f""
+
+                                            def products_replacer(match: re.Match[str]):
+                                                try:
+                                                    products_data = json.loads(match.group(1))
+                                                    products_str = ""
+                                                    for idx, _ in enumerate(products_data.get("selections", []) or []):
+                                                        name = products_data.get('selections', [])[idx][1]
+                                                        tags = products_data.get('tags', [])[idx]
+                                                        products_str += f"{name} - {tags}\n\n"
+
+                                                    return products_str
+                                                except:
+                                                    return ""
+
+                                            sequence_content = match.group(1)
+                                            sequence_content = sequence_content.replace("\ue200", "").replace("\ue202",
+                                                                                                              "\n").replace(
+                                                "\ue201", "")
+                                            sequence_content = sequence_content.replace("navlist\n", "#### ")
+
+                                            # Handle search, news, view and image citations
+                                            is_image_embedding = sequence_content.startswith("i\nturn")
+                                            is_video_embedding = sequence_content.startswith("video\n")
+                                            sequence_content = re.sub(
+                                                r'(?:cite\nturn[0-9]+|forecast\nturn[0-9]+|video\n.*?\nturn[0-9]+|i?\n?turn[0-9]+)(search|news|view|image|forecast)(\d+)',
+                                                citation_replacer,
+                                                sequence_content
+                                            )
+                                            sequence_content = re.sub(r'products\n(.*)', products_replacer,
+                                                                      sequence_content)
+                                            sequence_content = re.sub(r'product_entity\n\[".*","(.*)"\]',
+                                                                      lambda x: x.group(1), sequence_content)
+                                            return sequence_content
+
+                                        # process only completed sequences and do not touch start of next not completed sequence
+                                        buffer = re.sub(r'\ue200(.*?)\ue201', sequence_replacer, buffer,
+                                                        flags=re.DOTALL)
+
+                                        if buffer.find(u"\ue200") != -1:  # still have uncompleted sequence
                                             continue
+                                    else:
+                                        # do not yield to consume rest part of special sequence
+                                        continue
 
-                                    yield buffer
-                                    conversation.response_text += buffer
-                                    buffer = ""
-                                else:
-                                    yield chunk
-                            if conversation.finish_reason is not None:
-                                break
-                    except asyncio.CancelledError:
-                        conversation.finish_reason = conversation.finish_reason or "cancelled"
-                        break
+                                yield buffer
+                                buffer = ""
+                            else:
+                                yield chunk
+                        if conversation.finish_reason is not None:
+                            break
                     if buffer:
                         yield buffer
-                        conversation.response_text += buffer
                 if sources.list:
                     yield sources
                 if conversation.generated_images:
@@ -755,11 +718,6 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
             # if kwargs.get("wait_media"):
             #     async for _m in cls.wait_media(session, conversation, headers, auth_result):
             #         yield _m
-
-            if conversation_key:
-                cls._conversation_cache[conversation_key] = conversation
-            else:
-                cls._last_conversation = conversation
 
             yield FinishReason(conversation.finish_reason)
 
@@ -1248,7 +1206,6 @@ class Conversation(JsonConversation):
         self.prompt = None
         self.generated_images: ImagePreview = None
         self.task: dict = None
-        self.response_text = ""
 
 
 def get_cookies(
