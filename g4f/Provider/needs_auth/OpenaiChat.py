@@ -121,6 +121,7 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
     _headers: dict = None
     _cookies: Cookies = None
     _expires: int = None
+    _last_conversation: Conversation = None
 
     @classmethod
     async def on_auth_async(cls, proxy: str = None, **kwargs) -> AsyncIterator:
@@ -425,12 +426,17 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                 model = cls.get_model(model)
             except ModelNotFoundError:
                 pass
-            image_model = False
-            if model in cls.image_models:
-                image_model = True
-                model = cls.default_model
+            image_model = model in cls.image_models
+            if image_model:
+                model = cls.default_image_model
+
+            if conversation is None and cls._last_conversation and model == getattr(cls._last_conversation, "model", model):
+                conversation = cls._last_conversation
+                debug.log(f"OpenaiChat: Reusing conversation: {conversation.conversation_id}")
+            else:
+                cls._last_conversation = None
             if conversation is None:
-                conversation = Conversation(conversation_id, str(uuid.uuid4()), getattr(auth_result, "cookies", {}).get("oai-did"))
+                conversation = Conversation(conversation_id, str(uuid.uuid4()), getattr(auth_result, "cookies", {}).get("oai-did"), model=model)
             else:
                 conversation = copy(conversation)
 
@@ -438,7 +444,7 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                 conversation_mode = {"kind": "primary_assistant"}
 
             if getattr(auth_result, "cookies", {}).get("oai-did") != getattr(conversation, "user_id", None):
-                conversation = Conversation(conversation.conversation_id, getattr(conversation, "message_id", None) or str(uuid.uuid4()), getattr(auth_result, "cookies", {}).get("oai-did"))
+                conversation = Conversation(conversation.conversation_id, getattr(conversation, "message_id", None) or str(uuid.uuid4()), getattr(auth_result, "cookies", {}).get("oai-did"), model=model)
             if cls._api_key is None:
                 auto_continue = False
             conversation.finish_reason = None
@@ -686,6 +692,8 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                         if conversation.finish_reason is not None:
                             break
                     if buffer:
+                        if conversation.finish_reason is None:
+                            conversation.finish_reason = "stop"
                         yield buffer
                 if sources.list:
                     yield sources
@@ -694,6 +702,8 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                                         {"headers": auth_result.headers})
                     conversation.generated_images = None
                 conversation.prompt = None
+                conversation.model = model
+                cls._last_conversation = conversation
                 if return_conversation:
                     yield conversation
                 if auth_result.api_key is not None:
@@ -1190,7 +1200,7 @@ class Conversation(JsonConversation):
     """
 
     def __init__(self, conversation_id: str = None, message_id: str = None, user_id: str = None,
-                 finish_reason: str = None, parent_message_id: str = None, is_thinking: bool = False):
+                 finish_reason: str = None, parent_message_id: str = None, is_thinking: bool = False, model: str = None):
         self.conversation_id = conversation_id
         self.message_id = message_id
         self.finish_reason = finish_reason
@@ -1203,6 +1213,7 @@ class Conversation(JsonConversation):
         self.prompt = None
         self.generated_images: ImagePreview = None
         self.task: dict = None
+        self.model: str = model
 
 
 def get_cookies(
