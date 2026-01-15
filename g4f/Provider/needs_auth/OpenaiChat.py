@@ -997,14 +997,12 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                     debug.log(f"OpenaiChat: New conversation: {fields.conversation_id}")
                 m = v.get("message", {})
                 fields.recipient = m.get("recipient", fields.recipient)
-                if fields.recipient == "all": c = m.get("content", {})
-                    if c.get("content_type") == "text" and m.get("author", {}).get("role") == "tool" and "initial_text" in m.get("metadata", {}):
+                if fields.recipient == "all": 
+                    c = m.get("content", {})
+                    if c.get("content_type") == "text" and m.get("author", {}).get(
+                            "role") == "tool" and "initial_text" in m.get("metadata", {}):
                         fields.is_thinking = True
                         yield Reasoning(status=m.get("metadata", {}).get("initial_text"))
-                    # if c.get("content_type") == "multimodal_text":
-                    #    for part in c.get("parts"):
-                    #        if isinstance(part, dict) and part.get("content_type") == "image_asset_pointer":
-                    #            yield await cls.get_generated_image(session, auth_result, part, fields.prompt, fields.conversation_id)
                     if m.get("author", {}).get("role") == "assistant":
                         fields.message_id = m.get("id")
                     if m.get("status") == "finished_successfully" and m.get("metadata", {}).get("image_gen_task_id"):
