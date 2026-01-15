@@ -121,7 +121,6 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
     _headers: dict = None
     _cookies: Cookies = None
     _expires: int = None
-    _last_conversation_id: str = None
 
     @classmethod
     async def on_auth_async(cls, proxy: str = None, **kwargs) -> AsyncIterator:
@@ -391,8 +390,6 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
         Raises:
             RuntimeError: If an error occurs during processing.
         """
-        if conversation_id is None and cls._last_conversation_id is not None:
-            conversation_id = cls._last_conversation_id
         if temporary is None:
             temporary = action is not None and conversation_id is None
         if action is None:
@@ -536,7 +533,6 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                 if conversation.conversation_id is not None and not temporary:
                     data["conversation_id"] = conversation.conversation_id
                     debug.log(f"OpenaiChat: Use conversation: {conversation.conversation_id}")
-                    cls._last_conversation_id = conversation.conversation_id
                 prompt = conversation.prompt = format_media_prompt(messages, prompt)
                 if action != "continue":
                     data["parent_message_id"] = getattr(conversation, "parent_message_id", conversation.message_id)
@@ -992,7 +988,6 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                 if fields.conversation_id is None:
                     fields.conversation_id = v.get("conversation_id")
                     debug.log(f"OpenaiChat: New conversation: {fields.conversation_id}")
-                    cls._last_conversation_id = fields.conversation_id
                 m = v.get("message", {})
                 fields.recipient = m.get("recipient", fields.recipient)
                 if fields.recipient == "all":
@@ -1169,8 +1164,6 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
 
     @classmethod
     def _set_api_key(cls, api_key: str):
-        if cls._api_key == api_key and cls._expires and time.time() < cls._expires:
-            return True
         cls._api_key = api_key
         if api_key:
             exp = api_key.split(".")[1]
