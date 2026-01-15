@@ -438,7 +438,7 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                 conversation_mode = {"kind": "primary_assistant"}
 
             if getattr(auth_result, "cookies", {}).get("oai-did") != getattr(conversation, "user_id", None):
-                conversation = Conversation(conversation.conversation_id, str(uuid.uuid4()), getattr(auth_result, "cookies", {}).get("oai-did"))
+                conversation = Conversation(conversation.conversation_id, getattr(conversation, "message_id", None) or str(uuid.uuid4()), getattr(auth_result, "cookies", {}).get("oai-did"))
             if cls._api_key is None:
                 auto_continue = False
             conversation.finish_reason = None
@@ -1046,7 +1046,7 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
         if api_key is not None:
             cls._create_request_args(cls.request_config.cookies, cls.request_config.headers)
             cls._set_api_key(api_key)
-        else:
+        elif cls._api_key is None:
             try:
                 cls.request_config = await get_request_config(cls.request_config, proxy)
                 if cls.request_config is None:
