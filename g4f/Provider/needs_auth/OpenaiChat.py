@@ -541,8 +541,7 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                     debug.log(f"OpenaiChat: Use conversation: {conversation.conversation_id}")
                 prompt = conversation.prompt = format_media_prompt(messages, prompt)
                 if action != "continue":
-                    data["parent_message_id"] = getattr(conversation, "parent_message_id", conversation.message_id)
-                    conversation.parent_message_id = None
+                    data["parent_message_id"] = conversation.message_id
                     new_messages = messages
                     if conversation.conversation_id is not None:
                         new_messages = []
@@ -692,8 +691,6 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                         if conversation.finish_reason is not None:
                             break
                     if buffer:
-                        if conversation.finish_reason is None:
-                            conversation.finish_reason = "stop"
                         yield buffer
                 if sources.list:
                     yield sources
@@ -1000,10 +997,8 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                     debug.log(f"OpenaiChat: New conversation: {fields.conversation_id}")
                 m = v.get("message", {})
                 fields.recipient = m.get("recipient", fields.recipient)
-                if fields.recipient == "all":
-                    c = m.get("content", {})
-                    if c.get("content_type") == "text" and m.get("author", {}).get(
-                            "role") == "tool" and "initial_text" in m.get("metadata", {}):
+                if fields.recipient == "all": c = m.get("content", {})
+                    if c.get("content_type") == "text" and m.get("author", {}).get("role") == "tool" and "initial_text" in m.get("metadata", {}):
                         fields.is_thinking = True
                         yield Reasoning(status=m.get("metadata", {}).get("initial_text"))
                     # if c.get("content_type") == "multimodal_text":
@@ -1011,9 +1006,7 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                     #        if isinstance(part, dict) and part.get("content_type") == "image_asset_pointer":
                     #            yield await cls.get_generated_image(session, auth_result, part, fields.prompt, fields.conversation_id)
                     if m.get("author", {}).get("role") == "assistant":
-                        if fields.parent_message_id is None:
-                            fields.parent_message_id = v.get("message", {}).get("id")
-                        fields.message_id = v.get("message", {}).get("id")
+                        fields.message_id = m.get("id")
                     if m.get("status") == "finished_successfully" and m.get("metadata", {}).get("image_gen_task_id"):
                         fields.task = v
             return
@@ -1200,12 +1193,11 @@ class Conversation(JsonConversation):
     """
 
     def __init__(self, conversation_id: str = None, message_id: str = None, user_id: str = None,
-                 finish_reason: str = None, parent_message_id: str = None, is_thinking: bool = False, model: str = None):
+                 finish_reason: str = None, is_thinking: bool = False, model: str = None):
         self.conversation_id = conversation_id
         self.message_id = message_id
         self.finish_reason = finish_reason
         self.recipient = "all"
-        self.parent_message_id = message_id if parent_message_id is None else parent_message_id
         self.user_id = user_id
         self.is_thinking = is_thinking
         self.p = None
@@ -1213,7 +1205,6 @@ class Conversation(JsonConversation):
         self.prompt = None
         self.generated_images: ImagePreview = None
         self.task: dict = None
-        self.model: str = model
 
 
 def get_cookies(
