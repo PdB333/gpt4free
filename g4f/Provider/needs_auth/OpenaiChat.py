@@ -542,14 +542,10 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                 prompt = conversation.prompt = format_media_prompt(messages, prompt)
                 if action != "continue":
                     data["parent_message_id"] = conversation.message_id
-                    new_messages = messages
-                    if conversation.conversation_id is not None:
-                        new_messages = []
-                        for message in messages:
-                            if message.get("role") == "assistant":
-                                new_messages = []
-                            else:
-                                new_messages.append(message)
+                    if conversation.conversation_id is not None and len(messages) > 0:
+                        new_messages = [messages[-1]]
+                    else:
+                        new_messages = messages
                     data["messages"] = cls.create_messages(new_messages, image_requests,
                                                            ["search"] if web_search else None)
                 yield JsonRequest.from_dict(data)
@@ -997,7 +993,7 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                     debug.log(f"OpenaiChat: New conversation: {fields.conversation_id}")
                 m = v.get("message", {})
                 fields.recipient = m.get("recipient", fields.recipient)
-                if fields.recipient == "all": 
+                if fields.recipient == "all":
                     c = m.get("content", {})
                     if c.get("content_type") == "text" and m.get("author", {}).get(
                             "role") == "tool" and "initial_text" in m.get("metadata", {}):
