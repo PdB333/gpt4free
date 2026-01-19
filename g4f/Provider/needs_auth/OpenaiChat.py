@@ -122,6 +122,7 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
     _cookies: Cookies = None
     _expires: int = None
     _last_conversation: Conversation = None
+    _conversations: Dict[str, Conversation] = {}
 
     @classmethod
     async def on_auth_async(cls, proxy: str = None, **kwargs) -> AsyncIterator:
@@ -350,6 +351,13 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                 return ImageResponse(download_urls, prompt, {"status": status, "headers": auth_result.headers})
 
     @classmethod
+    def get_conversation_key(cls, messages: Messages) -> str:
+        return hashlib.sha256(json.dumps([
+            {"role": m.get("role"), "content": m.get("content")} 
+            for m in messages
+        ], sort_keys=True).encode()).hexdigest()
+
+    @classmethod
     async def create_authed(
         cls,
         model: str,
@@ -394,7 +402,7 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
         if action is None:
             action = "next"
         if temporary is None:
-            temporary = conversation_id is None and conversation is None
+            temporary = False
         async with StreamSession(
             proxy=proxy,
             impersonate="chrome",
@@ -445,6 +453,7 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
             conversation.finish_reason = None
             sources = OpenAISources([])
             references = ContentReferences()
+            full_response_content = ""
             while conversation.finish_reason is None:
                 conduit_token = None
                 if cls._api_key is not None:
@@ -676,13 +685,17 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                                         continue
 
                                 yield buffer
+                                full_response_content += buffer
                                 buffer = ""
                             else:
                                 yield chunk
+                                if isinstance(chunk, str):
+                                    full_response_content += chunk
                         if conversation.finish_reason is not None:
                             break
                     if buffer:
                         yield buffer
+                        full_response_content += buffer
                 if sources.list:
                     yield sources
                 if conversation.generated_images:
@@ -691,7 +704,9 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                     conversation.generated_images = None
                 conversation.prompt = None
                 conversation.model = model
-                cls._last_conversation = conversation
+                if conversation.conversation_id:
+                    cls._conversations[cls.get_conversation_key(messages + [{"role": "assistant", "content": full_response_content}])] = conversation
+                    cls._last_conversation = conversation
                 if return_conversation:
                     yield conversation
                 if auth_result.api_key is not None:
