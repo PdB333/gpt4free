@@ -51,6 +51,9 @@ class ChatCompletionsConfig(RequestConfig):
     parallel_tool_calls: bool = None
     tool_choice: Optional[str] = None
     conversation_id: Optional[str] = None
+    chat_id: Optional[str] = None
+    session_id: Optional[str] = None
+    parent_id: Optional[str] = None
 
 class ResponsesConfig(RequestConfig):
     input: Union[Messages, str]

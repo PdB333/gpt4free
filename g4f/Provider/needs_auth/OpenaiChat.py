@@ -405,6 +405,13 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
             action = "next"
         if temporary is None:
             temporary = False
+        debug.log(
+            "OpenaiChat: Request "
+            f"messages={len(messages)} "
+            f"roles={[m.get('role') for m in messages]} "
+            f"conversation_id={'set' if conversation_id else 'none'} "
+            f"conversation_obj={'set' if conversation else 'none'}"
+        )
         async with StreamSession(
             proxy=proxy,
             impersonate="chrome",

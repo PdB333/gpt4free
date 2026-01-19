@@ -454,6 +454,9 @@ class Api:
                     config.provider = AppConfig.provider if provider is None else provider
                 if config.conversation_id is None:
                     config.conversation_id = conversation_id
+                if config.conversation_id is None and getattr(config, "chat_id", None):
+                    config.conversation_id = config.chat_id
+                    g4f.debug.log(f"API: Using chat_id as conversation_id: {config.conversation_id}")
                 if config.timeout is None:
                     config.timeout = AppConfig.timeout
                 if config.stream_timeout is None and config.stream:
