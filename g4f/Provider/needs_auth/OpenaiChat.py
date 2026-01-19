@@ -353,7 +353,7 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
     @classmethod
     def get_conversation_key(cls, messages: Messages) -> str:
         return hashlib.sha256(json.dumps([
-            {"role": m.get("role"), "content": re.sub(r'\s+', ' ', to_string(m.get("content"))).strip()} 
+            {"role": m.get("role"), "content": re.sub(r'[^a-zA-Z0-9]', '', to_string(m.get("content")))} 
             for m in messages
         ], sort_keys=True).encode()).hexdigest()
 
@@ -438,26 +438,29 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
             if image_model:
                 model = cls.default_image_model
 
+            # Logique de réutilisation optimisée pour OpenWebUI
             if conversation is None:
-                if conversation_id is not None and conversation_id in cls._conversations:
-                    conversation = cls._conversations[conversation_id]
-                    debug.log(f"OpenaiChat: Reusing conversation by ID: {conversation.conversation_id}")
+                # 1. Recherche par ID envoyé par le client
+                conversation = cls._conversations.get(conversation_id)
+                # 2. Recherche par empreinte de l'historique
+                if conversation is None and len(messages) > 1:
+                    conversation = cls._conversations.get(cls.get_conversation_key(messages[:-1]))
+                # 3. Fallback global sur la dernière conversation (indispensable pour OpenWebUI)
+                if conversation is None and len(messages) > 1 and cls._last_conversation:
+                    conversation = cls._last_conversation
 
             if conversation is None:
-                if len(messages) > 1:
-                    key = cls.get_conversation_key(messages[:-1])
-                    if key in cls._conversations:
-                        conversation = cls._conversations[key]
-                        debug.log(f"OpenaiChat: Reusing conversation by hash: {conversation.conversation_id}")
-
-            if conversation is None:
-                conversation = Conversation(conversation_id, str(uuid.uuid4()), getattr(auth_result, "cookies", {}).get("oai-did"), model=model)
+                # Nouvelle conversation réelle
+                conversation = Conversation(None, str(uuid.uuid4()), getattr(auth_result, "cookies", {}).get("oai-did"), model=model)
+                debug.log("OpenaiChat: Starting new conversation thread")
+            else:
+                # On réutilise l'objet existant (ce qui préserve la chaîne de message_id)
+                debug.log(f"OpenaiChat: Reusing conversation: {conversation.conversation_id}")
+                conversation.model = model
+                conversation.user_id = getattr(auth_result, "cookies", {}).get("oai-did")
 
             if conversation_mode is None:
                 conversation_mode = {"kind": "primary_assistant"}
-
-            if getattr(auth_result, "cookies", {}).get("oai-did") != getattr(conversation, "user_id", None):
-                conversation = Conversation(conversation.conversation_id, getattr(conversation, "message_id", None) or str(uuid.uuid4()), getattr(auth_result, "cookies", {}).get("oai-did"), model=model)
             if cls._api_key is None:
                 auto_continue = False
             conversation.finish_reason = None
