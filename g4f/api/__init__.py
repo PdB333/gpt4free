@@ -456,12 +456,6 @@ class Api:
                     config.provider = AppConfig.provider if provider is None else provider
                 if config.conversation_id is None:
                     config.conversation_id = conversation_id
-                if config.conversation_id is None and getattr(config, "chat_id", None):
-                    config.conversation_id = config.chat_id
-                    g4f.debug.log(f"API: Using chat_id as conversation_id: {config.conversation_id}")
-                if config.conversation_id is None and getattr(config, "session_id", None):
-                    config.conversation_id = config.session_id
-                    g4f.debug.log(f"API: Using session_id as conversation_id: {config.conversation_id}")
                 if config.timeout is None:
                     config.timeout = AppConfig.timeout
                 if config.stream_timeout is None and config.stream:
@@ -482,21 +476,19 @@ class Api:
                     if header_keys:
                         g4f.debug.log(f"API: header keys: {header_keys}")
                     header_map = {
+                        "x-conversation-id": "conversation_id",
+                        "x-openwebui-conversation-id": "chat_id",
                         "x-chat-id": "chat_id",
                         "x-openwebui-chat-id": "chat_id",
-                        "x-conversation-id": "conversation_id",
-                        "x-openwebui-conversation-id": "conversation_id",
                         "x-session-id": "session_id",
                         "x-openwebui-session-id": "session_id",
                         "x-openwebui-parent-id": "parent_id",
                     }
-                    if config.conversation_id is None:
-                        for header_key, label in header_map.items():
-                            header_value = request.headers.get(header_key)
-                            if header_value:
-                                config.conversation_id = header_value
-                                g4f.debug.log(f"API: Using header {header_key} as conversation_id")
-                                break
+                    for header_key, label in header_map.items():
+                        header_value = request.headers.get(header_key)
+                        if header_value and getattr(config, label, None) is None:
+                            setattr(config, label, header_value)
+                            g4f.debug.log(f"API: Using header {header_key} as {label}")
                 except Exception:
                     pass
 
@@ -521,6 +513,18 @@ class Api:
                         client_key_source = "client"
                 if client_key:
                     g4f.debug.log(f"API: client_key={client_key} source={client_key_source}")
+                sticky_key = client_key
+                sticky_key_source = None
+                sticky_key_suffix = None
+                for label in ("chat_id", "session_id", "parent_id"):
+                    value = getattr(config, label, None)
+                    if value:
+                        sticky_key_suffix = value
+                        sticky_key_source = label
+                        break
+                if client_key and sticky_key_suffix:
+                    sticky_key = f"{client_key}:{sticky_key_suffix}"
+                    g4f.debug.log(f"API: sticky_key={sticky_key} source={sticky_key_source}")
                 if conversation:
                     conversation = JsonConversation(**conversation)
                 elif config.conversation_id is not None and config.provider is not None:
@@ -528,13 +532,13 @@ class Api:
                         if config.provider in self.conversations[config.conversation_id]:
                             conversation = self.conversations[config.conversation_id][config.provider]
                 else:
-                    if client_key and len(config.messages or []) <= 1:
-                        provider_conversations = self.client_conversations.get(client_key, {})
+                    if sticky_key and (sticky_key_suffix or len(config.messages or []) <= 1):
+                        provider_conversations = self.client_conversations.get(sticky_key, {})
                         conversation = provider_conversations.get(provider_key)
                         if conversation is not None:
-                            g4f.debug.log(f"API: Using sticky conversation for client {client_key} provider {provider_key}")
+                            g4f.debug.log(f"API: Using sticky conversation for client {sticky_key} provider {provider_key}")
                         else:
-                            g4f.debug.log(f"API: No sticky conversation for client {client_key} provider {provider_key}")
+                            g4f.debug.log(f"API: No sticky conversation for client {sticky_key} provider {provider_key}")
 
                 if config.image is not None:
                     try:
@@ -563,11 +567,11 @@ class Api:
                         if config.conversation_id not in self.conversations:
                             self.conversations[config.conversation_id] = {}
                         self.conversations[config.conversation_id][config.provider] = conversation_obj
-                    if client_key:
-                        if client_key not in self.client_conversations:
-                            self.client_conversations[client_key] = {}
-                        self.client_conversations[client_key][provider_key] = conversation_obj
-                        g4f.debug.log(f"API: Stored sticky conversation for client {client_key} provider {provider_key}")
+                    if sticky_key:
+                        if sticky_key not in self.client_conversations:
+                            self.client_conversations[sticky_key] = {}
+                        self.client_conversations[sticky_key][provider_key] = conversation_obj
+                        g4f.debug.log(f"API: Stored sticky conversation for client {sticky_key} provider {provider_key}")
 
                 # Create the completion response
                 response = self.client.chat.completions.create(

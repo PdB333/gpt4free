@@ -351,10 +351,11 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                 return ImageResponse(download_urls, prompt, {"status": status, "headers": auth_result.headers})
 
     @classmethod
-    def get_conversation_key(cls, messages: Messages, user_id: str | None = None) -> str:
+    def get_conversation_key(cls, messages: Messages, user_id: str | None = None, scope_id: str | None = None) -> str:
         user_messages = [m for m in messages if m.get("role") == "user"]
         payload = {
             "user_id": user_id or "",
+            "scope_id": scope_id or "",
             "messages": [
                 {"content": re.sub(r"[^a-zA-Z0-9]", "", to_string(m.get("content"))).lower()}
                 for m in user_messages
@@ -444,15 +445,22 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                 model = cls.default_image_model
 
             user_id = getattr(auth_result, "cookies", {}).get("oai-did")
+            scope_id = None
+            for label in ("chat_id", "session_id", "parent_id"):
+                value = kwargs.get(label)
+                if value:
+                    scope_id = value
+                    break
             history_key = None
             if len(messages) > 1:
-                history_key = cls.get_conversation_key(messages[:-1], user_id)
-            full_key = cls.get_conversation_key(messages, user_id)
+                history_key = cls.get_conversation_key(messages[:-1], user_id, scope_id)
+            full_key = cls.get_conversation_key(messages, user_id, scope_id)
             debug.log(
                 "OpenaiChat: Cache keys "
                 f"history={'set' if history_key else 'none'} "
                 f"full={'set' if full_key else 'none'} "
-                f"conversation_id={'set' if conversation_id else 'none'}"
+                f"conversation_id={'set' if conversation_id else 'none'} "
+                f"scope={'set' if scope_id else 'none'}"
             )
 
             if conversation is None:
