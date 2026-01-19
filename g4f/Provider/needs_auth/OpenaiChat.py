@@ -122,6 +122,7 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
     _cookies: Cookies = None
     _expires: int = None
     _last_conversation: Conversation = None
+    _conversations: Dict[str, Conversation] = {}
 
     @classmethod
     async def on_auth_async(cls, proxy: str = None, **kwargs) -> AsyncIterator:
@@ -350,6 +351,18 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                 return ImageResponse(download_urls, prompt, {"status": status, "headers": auth_result.headers})
 
     @classmethod
+    def get_conversation_key(cls, messages: Messages, user_id: str | None = None) -> str:
+        user_messages = [m for m in messages if m.get("role") == "user"]
+        payload = {
+            "user_id": user_id or "",
+            "messages": [
+                {"content": re.sub(r"[^a-zA-Z0-9]", "", to_string(m.get("content"))).lower()}
+                for m in user_messages
+            ],
+        }
+        return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+    @classmethod
     async def create_authed(
         cls,
         model: str,
@@ -430,21 +443,64 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
             if image_model:
                 model = cls.default_image_model
 
-            if conversation is None and cls._last_conversation and model == getattr(cls._last_conversation, "model", model):
-                conversation = cls._last_conversation
-                debug.log(f"OpenaiChat: Reusing conversation: {conversation.conversation_id}")
-            else:
-                cls._last_conversation = None
+            user_id = getattr(auth_result, "cookies", {}).get("oai-did")
+            history_key = None
+            if len(messages) > 1:
+                history_key = cls.get_conversation_key(messages[:-1], user_id)
+            full_key = cls.get_conversation_key(messages, user_id)
+            debug.log(
+                "OpenaiChat: Cache keys "
+                f"history={'set' if history_key else 'none'} "
+                f"full={'set' if full_key else 'none'} "
+                f"conversation_id={'set' if conversation_id else 'none'}"
+            )
+
             if conversation is None:
-                conversation = Conversation(conversation_id, str(uuid.uuid4()), getattr(auth_result, "cookies", {}).get("oai-did"), model=model)
+                if conversation_id:
+                    conversation = cls._conversations.get(conversation_id)
+                    if conversation is not None:
+                        debug.log(f"OpenaiChat: Cache hit by conversation_id: {conversation_id}")
+                if conversation is None and history_key:
+                    conversation = cls._conversations.get(history_key)
+                    if conversation is not None:
+                        debug.log("OpenaiChat: Cache hit by history_key")
+                if conversation is None and full_key:
+                    conversation = cls._conversations.get(full_key)
+                    if conversation is not None:
+                        debug.log("OpenaiChat: Cache hit by full_key")
+                if conversation is None and len(messages) > 1 and cls._last_conversation:
+                    if getattr(cls._last_conversation, "model", None) == model:
+                        conversation = cls._last_conversation
+                        debug.log("OpenaiChat: Cache hit by last_conversation")
+
+            if conversation is None:
+                conversation = Conversation(conversation_id, str(uuid.uuid4()), user_id, model=model)
+                debug.log(f"OpenaiChat: New conversation placeholder: {conversation.message_id}")
             else:
                 conversation = copy(conversation)
+                debug.log(f"OpenaiChat: Reusing conversation: {conversation.conversation_id}")
+                conversation.model = model
+                conversation.user_id = user_id
+
+            if conversation_id:
+                cls._conversations[conversation_id] = conversation
+            if history_key:
+                cls._conversations[history_key] = conversation
+            if full_key:
+                cls._conversations[full_key] = conversation
+            if any([conversation_id, history_key, full_key]):
+                debug.log("OpenaiChat: Cache updated with preflight keys")
 
             if conversation_mode is None:
                 conversation_mode = {"kind": "primary_assistant"}
 
-            if getattr(auth_result, "cookies", {}).get("oai-did") != getattr(conversation, "user_id", None):
-                conversation = Conversation(conversation.conversation_id, getattr(conversation, "message_id", None) or str(uuid.uuid4()), getattr(auth_result, "cookies", {}).get("oai-did"), model=model)
+            if user_id != getattr(conversation, "user_id", None):
+                conversation = Conversation(
+                    conversation.conversation_id,
+                    getattr(conversation, "message_id", None) or str(uuid.uuid4()),
+                    user_id,
+                    model=model,
+                )
             if cls._api_key is None:
                 auto_continue = False
             conversation.finish_reason = None
@@ -696,7 +752,32 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                     conversation.generated_images = None
                 conversation.prompt = None
                 conversation.model = model
-                cls._last_conversation = conversation
+                cache_keys = set()
+                if conversation_id:
+                    cache_keys.add(conversation_id)
+                if conversation.conversation_id:
+                    cache_keys.add(conversation.conversation_id)
+                if history_key:
+                    cache_keys.add(history_key)
+                if full_key:
+                    cache_keys.add(full_key)
+                if cache_keys:
+                    for key in cache_keys:
+                        cls._conversations[key] = conversation
+                    cls._last_conversation = conversation
+                    debug.log(
+                        "OpenaiChat: Cache updated with keys "
+                        + ",".join([
+                            "conversation_id" if k == conversation_id else
+                            "chatgpt_id" if k == conversation.conversation_id else
+                            "history_key" if k == history_key else
+                            "full_key" if k == full_key else
+                            "key"
+                            for k in cache_keys
+                        ])
+                    )
+                else:
+                    cls._last_conversation = conversation
                 if return_conversation:
                     yield conversation
                 if auth_result.api_key is not None:
