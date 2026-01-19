@@ -438,6 +438,7 @@ class Api:
         @self.app.post("/api/{provider}/{conversation_id}/chat/completions", responses=responses)
         async def chat_completions(
             config: ChatCompletionsConfig,
+            request: Request,
             credentials: Annotated[HTTPAuthorizationCredentials, Depends(Api.security)] = None,
             provider: str = None,
             conversation_id: str = None,
@@ -457,12 +458,24 @@ class Api:
                 if config.conversation_id is None and getattr(config, "chat_id", None):
                     config.conversation_id = config.chat_id
                     g4f.debug.log(f"API: Using chat_id as conversation_id: {config.conversation_id}")
+                if config.conversation_id is None and getattr(config, "session_id", None):
+                    config.conversation_id = config.session_id
+                    g4f.debug.log(f"API: Using session_id as conversation_id: {config.conversation_id}")
                 if config.timeout is None:
                     config.timeout = AppConfig.timeout
                 if config.stream_timeout is None and config.stream:
                     config.stream_timeout = AppConfig.stream_timeout
                 if credentials is not None and credentials.credentials != "secret":
                     config.api_key = credentials.credentials
+                try:
+                    raw = await request.json()
+                    if isinstance(raw, dict):
+                        g4f.debug.log(f"API: request keys: {sorted(raw.keys())}")
+                        for key in ("chat_id", "session_id", "id", "parent_id", "conversation_id"):
+                            if key in raw:
+                                g4f.debug.log(f"API: request {key} present")
+                except Exception:
+                    pass
 
                 conversation = config.conversation
                 if conversation:
