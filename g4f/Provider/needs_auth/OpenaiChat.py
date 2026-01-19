@@ -439,11 +439,16 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                 model = cls.default_image_model
 
             if conversation is None:
+                if conversation_id is not None and conversation_id in cls._conversations:
+                    conversation = cls._conversations[conversation_id]
+                    debug.log(f"OpenaiChat: Reusing conversation by ID: {conversation.conversation_id}")
+
+            if conversation is None:
                 if len(messages) > 1:
                     key = cls.get_conversation_key(messages[:-1])
                     if key in cls._conversations:
                         conversation = cls._conversations[key]
-                        debug.log(f"OpenaiChat: Reusing conversation: {conversation.conversation_id}")
+                        debug.log(f"OpenaiChat: Reusing conversation by hash: {conversation.conversation_id}")
 
             if conversation is None:
                 conversation = Conversation(conversation_id, str(uuid.uuid4()), getattr(auth_result, "cookies", {}).get("oai-did"), model=model)
@@ -712,6 +717,8 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                 conversation.prompt = None
                 conversation.model = model
                 if conversation.conversation_id:
+                    if conversation_id is not None:
+                        cls._conversations[conversation_id] = conversation
                     cls._conversations[cls.get_conversation_key(messages + [{"role": "assistant", "content": full_response_content.strip()}])] = conversation
                     cls._last_conversation = conversation
                 if return_conversation:
