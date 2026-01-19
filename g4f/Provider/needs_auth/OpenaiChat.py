@@ -353,7 +353,7 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
     @classmethod
     def get_conversation_key(cls, messages: Messages) -> str:
         return hashlib.sha256(json.dumps([
-            {"role": m.get("role"), "content": to_string(m.get("content")).strip()} 
+            {"role": m.get("role"), "content": re.sub(r'\s+', ' ', to_string(m.get("content"))).strip()} 
             for m in messages
         ], sort_keys=True).encode()).hexdigest()
 
@@ -452,8 +452,6 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
 
             if conversation is None:
                 conversation = Conversation(conversation_id, str(uuid.uuid4()), getattr(auth_result, "cookies", {}).get("oai-did"), model=model)
-            else:
-                conversation = copy(conversation)
 
             if conversation_mode is None:
                 conversation_mode = {"kind": "primary_assistant"}
