@@ -209,6 +209,7 @@ class Api:
         self.client = AsyncClient()
         self.get_g4f_api_key = APIKeyHeader(name="g4f-api-key")
         self.conversations: dict[str, dict[str, BaseConversation]] = {}
+        self.client_conversations: dict[str, dict[str, BaseConversation]] = {}
 
     security = HTTPBearer(auto_error=False)
     basic_security = HTTPBasic()
@@ -500,12 +501,40 @@ class Api:
                     pass
 
                 conversation = config.conversation
+                provider_key = config.provider or provider or "any"
+                client_key = None
+                client_key_source = None
+                header_user = request.headers.get("x-user") or request.headers.get("x-openwebui-user")
+                if header_user:
+                    client_key = header_user
+                    client_key_source = "header"
+                else:
+                    forwarded = request.headers.get("x-forwarded-for")
+                    if forwarded:
+                        client_key = forwarded.split(",")[0].strip()
+                        client_key_source = "x-forwarded-for"
+                    elif request.headers.get("x-real-ip"):
+                        client_key = request.headers.get("x-real-ip")
+                        client_key_source = "x-real-ip"
+                    elif request.client:
+                        client_key = request.client.host
+                        client_key_source = "client"
+                if client_key:
+                    g4f.debug.log(f"API: client_key={client_key} source={client_key_source}")
                 if conversation:
                     conversation = JsonConversation(**conversation)
                 elif config.conversation_id is not None and config.provider is not None:
                     if config.conversation_id in self.conversations:
                         if config.provider in self.conversations[config.conversation_id]:
                             conversation = self.conversations[config.conversation_id][config.provider]
+                else:
+                    if client_key and len(config.messages or []) <= 1:
+                        provider_conversations = self.client_conversations.get(client_key, {})
+                        conversation = provider_conversations.get(provider_key)
+                        if conversation is not None:
+                            g4f.debug.log(f"API: Using sticky conversation for client {client_key} provider {provider_key}")
+                        else:
+                            g4f.debug.log(f"API: No sticky conversation for client {client_key} provider {provider_key}")
 
                 if config.image is not None:
                     try:
@@ -521,6 +550,24 @@ class Api:
                         except ValueError as e:
                             example = json.dumps({"media": [["data:image/jpeg;base64,...", "filename.jpg"]]})
                             return ErrorResponse.from_message(f'The media you send must be a data URIs. Example: {example}', status_code=HTTP_422_UNPROCESSABLE_ENTITY)
+
+                def cache_conversation(conversation_value) -> None:
+                    if not conversation_value:
+                        return
+                    conversation_obj = conversation_value
+                    if isinstance(conversation_value, dict):
+                        conversation_obj = JsonConversation(**conversation_value)
+                    elif not isinstance(conversation_value, BaseConversation):
+                        return
+                    if config.conversation_id is not None and config.provider is not None:
+                        if config.conversation_id not in self.conversations:
+                            self.conversations[config.conversation_id] = {}
+                        self.conversations[config.conversation_id][config.provider] = conversation_obj
+                    if client_key:
+                        if client_key not in self.client_conversations:
+                            self.client_conversations[client_key] = {}
+                        self.client_conversations[client_key][provider_key] = conversation_obj
+                        g4f.debug.log(f"API: Stored sticky conversation for client {client_key} provider {provider_key}")
 
                 # Create the completion response
                 response = self.client.chat.completions.create(
@@ -541,18 +588,18 @@ class Api:
                 )
 
                 if not config.stream:
-                    return await response
+                    result = await response
+                    cache_conversation(getattr(result, "conversation", None))
+                    return result
 
                 async def streaming():
                     try:
                         async for chunk in response:
                             if isinstance(chunk, BaseConversation):
-                                if config.conversation_id is not None and config.provider is not None:
-                                    if config.conversation_id not in self.conversations:
-                                        self.conversations[config.conversation_id] = {}
-                                    self.conversations[config.conversation_id][config.provider] = chunk
-                            else:
-                                yield f"data: {chunk.model_dump_json() if hasattr(chunk, 'model_dump_json') else chunk.json()}\n\n"
+                                cache_conversation(chunk)
+                                continue
+                            cache_conversation(getattr(chunk, "conversation", None))
+                            yield f"data: {chunk.model_dump_json() if hasattr(chunk, 'model_dump_json') else chunk.json()}\n\n"
                     except GeneratorExit:
                         pass
                     except Exception as e:
