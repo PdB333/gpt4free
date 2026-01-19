@@ -353,7 +353,7 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
     @classmethod
     def get_conversation_key(cls, messages: Messages) -> str:
         return hashlib.sha256(json.dumps([
-            {"role": m.get("role"), "content": m.get("content")} 
+            {"role": m.get("role"), "content": to_string(m.get("content")).strip()} 
             for m in messages
         ], sort_keys=True).encode()).hexdigest()
 
@@ -437,6 +437,13 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
             image_model = model in cls.image_models
             if image_model:
                 model = cls.default_image_model
+
+            if conversation is None:
+                if len(messages) > 1:
+                    key = cls.get_conversation_key(messages[:-1])
+                    if key in cls._conversations:
+                        conversation = cls._conversations[key]
+                        debug.log(f"OpenaiChat: Reusing conversation: {conversation.conversation_id}")
 
             if conversation is None:
                 conversation = Conversation(conversation_id, str(uuid.uuid4()), getattr(auth_result, "cookies", {}).get("oai-did"), model=model)
@@ -705,7 +712,7 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                 conversation.prompt = None
                 conversation.model = model
                 if conversation.conversation_id:
-                    cls._conversations[cls.get_conversation_key(messages + [{"role": "assistant", "content": full_response_content}])] = conversation
+                    cls._conversations[cls.get_conversation_key(messages + [{"role": "assistant", "content": full_response_content.strip()}])] = conversation
                     cls._last_conversation = conversation
                 if return_conversation:
                     yield conversation
