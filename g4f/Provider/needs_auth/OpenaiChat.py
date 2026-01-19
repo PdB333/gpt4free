@@ -391,10 +391,10 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
         Raises:
             RuntimeError: If an error occurs during processing.
         """
-        if temporary is None:
-            temporary = action is not None and conversation_id is None
         if action is None:
             action = "next"
+        if temporary is None:
+            temporary = conversation_id is None and conversation is None
         async with StreamSession(
             proxy=proxy,
             impersonate="chrome",
@@ -430,11 +430,6 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
             if image_model:
                 model = cls.default_image_model
 
-            # if conversation is None and cls._last_conversation and model == getattr(cls._last_conversation, "model", model):
-            #     conversation = cls._last_conversation
-            #     debug.log(f"OpenaiChat: Reusing conversation: {conversation.conversation_id}")
-            # else:
-            #     cls._last_conversation = None
             if conversation is None:
                 conversation = Conversation(conversation_id, str(uuid.uuid4()), getattr(auth_result, "cookies", {}).get("oai-did"), model=model)
             else:
