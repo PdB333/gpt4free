@@ -476,6 +476,28 @@ class Api:
                                 g4f.debug.log(f"API: request {key} present")
                 except Exception:
                     pass
+                try:
+                    header_keys = sorted([k for k in request.headers.keys() if k.lower().startswith("x-")])
+                    if header_keys:
+                        g4f.debug.log(f"API: header keys: {header_keys}")
+                    header_map = {
+                        "x-chat-id": "chat_id",
+                        "x-openwebui-chat-id": "chat_id",
+                        "x-conversation-id": "conversation_id",
+                        "x-openwebui-conversation-id": "conversation_id",
+                        "x-session-id": "session_id",
+                        "x-openwebui-session-id": "session_id",
+                        "x-openwebui-parent-id": "parent_id",
+                    }
+                    if config.conversation_id is None:
+                        for header_key, label in header_map.items():
+                            header_value = request.headers.get(header_key)
+                            if header_value:
+                                config.conversation_id = header_value
+                                g4f.debug.log(f"API: Using header {header_key} as conversation_id")
+                                break
+                except Exception:
+                    pass
 
                 conversation = config.conversation
                 if conversation:
