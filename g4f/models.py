@@ -120,6 +120,8 @@ class Model:
     base_provider: str
     best_provider: ProviderType = None
     long_name: Optional[str] = None
+    image_generation: bool = False
+    vision: bool = False
 
     def get_long_name(self) -> str:
         """Get the long name of the model, if available."""
@@ -127,6 +129,10 @@ class Model:
 
     def __post_init__(self):
         """Auto-register model after initialization"""
+        if isinstance(self, ImageModel):
+            self.image_generation = True
+        if isinstance(self, VisionModel):
+            self.vision = True
         if self.name:
             ModelRegistry.register(self)
 
@@ -308,19 +314,25 @@ gpt_5_thinking = Model(
 gpt_5_2 = Model(
     name          = 'gpt-5.2',
     base_provider = 'OpenAI',
-    best_provider = OpenaiChat
+    best_provider = OpenaiChat,
+    image_generation = True,
+    vision = True
 )
 
 gpt_5_2_instant = Model(
     name          = 'gpt-5.2-instant',
     base_provider = 'OpenAI',
-    best_provider = OpenaiChat
+    best_provider = OpenaiChat,
+    image_generation = True,
+    vision = True
 )
 
 gpt_5_2_thinking = Model(
     name          = 'gpt-5.2-thinking',
     base_provider = 'OpenAI',
-    best_provider = OpenaiChat
+    best_provider = OpenaiChat,
+    image_generation = True,
+    vision = True
 )
 
 gpt_oss_120b = Model(
@@ -564,16 +576,28 @@ gemini_3_pro_preview = Model(
     best_provider = IterListProvider([Gemini, GeminiPro, GeminiCLI])
 )
 
+gemini_3_rapid = Model(
+    name          = 'gemini-3-rapid',
+    base_provider = 'Google',
+    best_provider = Gemini,
+    image_generation = True,
+    vision = True
+)
+
 gemini_3_reasoning = Model(
     name          = 'gemini-3-reasoning',
     base_provider = 'Google',
-    best_provider = Gemini
+    best_provider = Gemini,
+    image_generation = True,
+    vision = True
 )
 
 gemini_3_pro = Model(
     name          = 'gemini-3-pro',
     base_provider = 'Google',
-    best_provider = Gemini
+    best_provider = Gemini,
+    image_generation = True,
+    vision = True
 )
 
 # codegemma
