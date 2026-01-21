@@ -478,9 +478,9 @@ class Api:
                         content = msg.get("content")
                         if not isinstance(content, str):
                             continue
-                        match = re.search(r"<!--\\s*chat_id:\\s*([A-Za-z0-9-]+)\\s*-->", content)
+                        match = re.search(r"<!--\s*chat_id:\s*([A-Za-z0-9-]+)\s*-->", content)
                         if not match:
-                            match = re.search(r"\\[\\[chat_id:([A-Za-z0-9-]+)\\]\\]", content)
+                            match = re.search(r"\[\[chat_id:([A-Za-z0-9-]+)\]\]", content)
                         if not match:
                             continue
                         extracted_id = match.group(1)
