@@ -513,7 +513,7 @@ class Api:
                         client_key_source = "client"
                 if client_key:
                     g4f.debug.log(f"API: client_key={client_key} source={client_key_source}")
-                sticky_key = client_key
+                sticky_key = None
                 sticky_key_source = None
                 sticky_key_suffix = None
                 for label in ("chat_id", "session_id", "parent_id"):
@@ -532,7 +532,7 @@ class Api:
                         if config.provider in self.conversations[config.conversation_id]:
                             conversation = self.conversations[config.conversation_id][config.provider]
                 else:
-                    if sticky_key and (sticky_key_suffix or len(config.messages or []) <= 1):
+                    if sticky_key:
                         provider_conversations = self.client_conversations.get(sticky_key, {})
                         conversation = provider_conversations.get(provider_key)
                         if conversation is not None:
