@@ -352,13 +352,15 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
 
     @classmethod
     def get_conversation_key(cls, messages: Messages, user_id: str | None = None, scope_id: str | None = None) -> str:
-        user_messages = [m for m in messages if m.get("role") == "user"]
         payload = {
             "user_id": user_id or "",
             "scope_id": scope_id or "",
             "messages": [
-                {"content": re.sub(r"[^a-zA-Z0-9]", "", to_string(m.get("content"))).lower()}
-                for m in user_messages
+                {
+                    "role": m.get("role"),
+                    "content": re.sub(r"[^a-zA-Z0-9]", "", to_string(m.get("content"))).lower(),
+                }
+                for m in messages
             ],
         }
         return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
