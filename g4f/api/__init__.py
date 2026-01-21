@@ -471,6 +471,22 @@ class Api:
                                 g4f.debug.log(f"API: request {key} present")
                 except Exception:
                     pass
+                if config.messages and isinstance(config.messages, list):
+                    for msg in config.messages:
+                        if not isinstance(msg, dict):
+                            continue
+                        content = msg.get("content")
+                        if not isinstance(content, str):
+                            continue
+                        match = re.search(r"(<!-- chat_id: ([\\w-]+) -->|\\[\\[chat_id:([\\w-]+)\\]\\])", content)
+                        if not match:
+                            continue
+                        extracted_id = match.group(2) or match.group(3)
+                        if extracted_id and config.chat_id is None:
+                            config.chat_id = extracted_id
+                            g4f.debug.log(f"API: Extracted chat_id from message: {extracted_id}")
+                        msg["content"] = content.replace(match.group(0), "").rstrip()
+                        break
                 try:
                     header_keys = sorted([k for k in request.headers.keys() if k.lower().startswith("x-")])
                     if header_keys:
