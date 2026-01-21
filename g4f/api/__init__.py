@@ -478,10 +478,12 @@ class Api:
                         content = msg.get("content")
                         if not isinstance(content, str):
                             continue
-                        match = re.search(r"(<!-- chat_id: ([\\w-]+) -->|\\[\\[chat_id:([\\w-]+)\\]\\])", content)
+                        match = re.search(r"<!--\\s*chat_id:\\s*([A-Za-z0-9-]+)\\s*-->", content)
+                        if not match:
+                            match = re.search(r"\\[\\[chat_id:([A-Za-z0-9-]+)\\]\\]", content)
                         if not match:
                             continue
-                        extracted_id = match.group(2) or match.group(3)
+                        extracted_id = match.group(1)
                         if extracted_id and config.chat_id is None:
                             config.chat_id = extracted_id
                             g4f.debug.log(f"API: Extracted chat_id from message: {extracted_id}")
