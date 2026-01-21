@@ -290,6 +290,8 @@ class Client(BaseClient):
         **kwargs
     ) -> None:
         super().__init__(**kwargs)
+        if self.base_url and provider is None:
+            provider = create_custom_provider(base_url=self.base_url, api_key=self.api_key)
         self.chat: Chat = Chat(self, provider)
         if media_provider is None:
             media_provider = kwargs.get("image_provider", provider)
@@ -800,17 +802,13 @@ class ClientFactory:
     
     Supports:
     - Named providers (e.g., "PollinationsAI", "DeepInfra")
-    - Multiple providers (space-separated string or list)
     - Custom providers with custom API base URLs
     - Live providers (dynamically loaded providers)
     
     Example usage:
         # Create client with a named provider
         client = ClientFactory.create_client("PollinationsAI")
-        
-        # Create client with multiple providers (fallback)
-        client = ClientFactory.create_client(["PollinationsAI", "DeepInfra"])
-        
+                
         # Create client with custom provider
         client = ClientFactory.create_client(
             base_url="https://api.example.com/v1",
@@ -861,8 +859,8 @@ class ClientFactory:
         else:
             if not cls._live_providers:
                 path = Path(get_cookies_dir()) / "models" / datetime.today().strftime('%Y-%m-%d') / f"providers.json"
+                path.parent.mkdir(parents=True, exist_ok=True)
                 if path.exists():
-                    path.parent.mkdir(parents=True, exist_ok=True)
                     with open(path, "r", encoding="utf-8") as f:
                         cls._live_providers = json.load(f)
                 cls._live_providers = requests.get(cls._live_providers_url).json()
@@ -909,10 +907,7 @@ class ClientFactory:
         Example:
             # Named provider
             client = ClientFactory.create_client("PollinationsAI")
-            
-            # Multiple providers (fallback)
-            client = ClientFactory.create_client(["PollinationsAI", "DeepInfra"])
-            
+                        
             # Custom provider
             client = ClientFactory.create_client(
                 base_url="https://api.openai.com/v1",
@@ -954,16 +949,16 @@ class ClientFactory:
             
         Example:
             # Named provider
-            client = ClientFactory.createAsyncClient("PollinationsAI")
+            client = ClientFactory.create_async_client("PollinationsAI")
 
             # Custom provider
-            client = ClientFactory.createAsyncClient(
+            client = ClientFactory.create_async_client(
                 base_url="https://api.openai.com/v1",
                 api_key="sk-..."
             )
         """
         return AsyncClient(
-            provider=cls.createProvider(provider, base_url, api_key, **kwargs),
+            provider=cls.create_provider(provider, base_url, api_key, **kwargs),
             media_provider=media_provider,
             api_key=api_key,
             base_url=base_url,

@@ -16,7 +16,7 @@ def get_config_dir() -> Path:
 
 DEFAULT_PORT = 1337
 DEFAULT_TIMEOUT = 600
-DEFAULT_STREAM_TIMEOUT = 15
+DEFAULT_STREAM_TIMEOUT = 30
 
 PACKAGE_NAME = "g4f"
 CONFIG_DIR = get_config_dir() / PACKAGE_NAME
@@ -25,7 +25,7 @@ CUSTOM_COOKIES_DIR = "./har_and_cookies"
 ORGANIZATION = "gpt4free"
 GITHUB_REPOSITORY = f"xtekky/{ORGANIZATION}"
 STATIC_DOMAIN = f"{PACKAGE_NAME}.dev"
-STATIC_URL = f"https://{ORGANIZATION}.github.io/"
+STATIC_URL = f"https://{STATIC_DOMAIN}/"
 REFFERER_URL = f"https://{STATIC_DOMAIN}/"
 DIST_DIR = f"./{STATIC_DOMAIN}/dist"
 DEFAULT_MODEL = "openai/gpt-oss-120b"

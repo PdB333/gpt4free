@@ -30,7 +30,7 @@ except ImportError:
 
 from ...typing import AsyncResult, Messages, MediaListType
 from ...requests import get_args_from_nodriver, raise_for_status, merge_cookies
-from ...requests.aiohttp import StreamSession
+from ...requests import StreamSession
 from ...errors import ModelNotFoundError, CloudflareError, MissingAuthError, MissingRequirementsError, \
     RateLimitError
 from ...providers.response import FinishReason, Usage, JsonConversation, ImageResponse, Reasoning, PlainTextResponse, \
@@ -237,7 +237,6 @@ class LMArena(AsyncGeneratorProvider, ProviderModelMixin, AuthFileMixin):
             await cls.__load_actions(html)
 
         args = await get_args_from_nodriver(cls.url, proxy=proxy, callback=callback)
-        args["impersonate"] = "chrome136"
 
         with cache_file.open("w") as f:
             json.dump(args, f)
@@ -279,7 +278,6 @@ class LMArena(AsyncGeneratorProvider, ProviderModelMixin, AuthFileMixin):
             cls.url, proxy=proxy, callback=callback, cookies=args.get("cookies", {}), user_data_dir="grecaptcha",
             browser_args=["--guest", "--disable-gpu", "--no-sandbox"])
 
-        args["impersonate"] = "chrome136"
         with cache_file.open("w") as f:
             json.dump(args, f)
 
@@ -570,7 +568,6 @@ class LMArena(AsyncGeneratorProvider, ProviderModelMixin, AuthFileMixin):
                             url,
                             json=data,
                             proxy=proxy,
-                            # impersonate="chrome136"
                     ) as response:
                         await raise_for_status(response)
                         args["cookies"] = merge_cookies(args["cookies"], response)
@@ -603,7 +600,7 @@ class LMArena(AsyncGeneratorProvider, ProviderModelMixin, AuthFileMixin):
                             elif line.startswith("a3:"):
                                 raise RuntimeError(f"LMArena: {json.loads(line[3:])}")
                             else:
-                                debug.log(f"LMArena: Unknown line prefix: {line}")
+                                debug.log(f"LMArena: Unknown line prefix: {line[:2]}")
                 break
             except (CloudflareError, MissingAuthError) as error:
                 args = None
