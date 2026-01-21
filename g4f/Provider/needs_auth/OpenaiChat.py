@@ -43,7 +43,6 @@ from ... import debug
 
 DEFAULT_HEADERS = {
     "accept": "*/*",
-    "accept-encoding": "gzip, deflate, br, zstd",
     'accept-language': 'en-US,en;q=0.8',
     "referer": "https://chatgpt.com/",
     "sec-ch-ua": "\"Google Chrome\";v=\"131\", \"Chromium\";v=\"131\", \"Not_A Brand\";v=\"24\"",
@@ -52,7 +51,6 @@ DEFAULT_HEADERS = {
     "sec-fetch-dest": "empty",
     "sec-fetch-mode": "cors",
     "sec-fetch-site": "same-origin",
-    "sec-gpc": "1",
     "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 }
 
@@ -81,7 +79,6 @@ UPLOAD_HEADERS = {
     "accept": "application/json, text/plain, */*",
     'accept-language': 'en-US,en;q=0.8',
     "referer": "https://chatgpt.com/",
-    "priority": "u=1, i",
     "sec-ch-ua": "\"Google Chrome\";v=\"131\", \"Chromium\";v=\"131\", \"Not_A Brand\";v=\"24\"",
     "sec-ch-ua-mobile": "?0",
     'sec-ch-ua-platform': '"macOS"',
@@ -198,7 +195,7 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                     }
                 )
             # Put the image bytes to the upload URL and check the status
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.2)
             async with session.put(
                     file_data["upload_url"],
                     data=data_bytes,
@@ -425,6 +422,7 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                 model = cls.get_model(model)
             except ModelNotFoundError:
                 pass
+            is_reasoning = model in {"gpt-5.2-thinking", "gpt-5-2-thinking"}
             image_model = False
             if model in cls.image_models:
                 image_model = True
@@ -462,6 +460,8 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                         "supports_buffering": True,
                         "supported_encodings": ["v1"]
                     }
+                    if is_reasoning:
+                        data["is_reasoning"] = True
                     if temporary:
                         data["history_and_training_disabled"] = True
                     async with session.post(
@@ -527,6 +527,8 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                                                "screen_height": 1080, "screen_width": 1920},
                     "paragen_cot_summary_display_override": "allow"
                 }
+                if is_reasoning:
+                    data["is_reasoning"] = True
                 if temporary:
                     data["history_and_training_disabled"] = True
 
@@ -537,15 +539,7 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                 if action != "continue":
                     data["parent_message_id"] = getattr(conversation, "parent_message_id", conversation.message_id)
                     conversation.parent_message_id = None
-                    new_messages = messages
-                    if conversation.conversation_id is not None:
-                        new_messages = []
-                        for message in messages:
-                            if message.get("role") == "assistant":
-                                new_messages = []
-                            else:
-                                new_messages.append(message)
-                    data["messages"] = cls.create_messages(new_messages, image_requests,
+                    data["messages"] = cls.create_messages(messages, image_requests,
                                                            ["search"] if web_search else None)
                 yield JsonRequest.from_dict(data)
                 headers = {
@@ -1124,12 +1118,12 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                         break
                 if cls._api_key is not None or not cls.needs_auth:
                     break
-                await asyncio.sleep(1)
+                await asyncio.sleep(0.25)
             debug.log(f"OpenaiChat: Access token: {'False' if cls._api_key is None else cls._api_key[:12] + '...'}")
             while True:
                 if cls.request_config.proof_token:
                     break
-                await asyncio.sleep(1)
+                await asyncio.sleep(0.25)
             debug.log(f"OpenaiChat: Proof token: Yes")
             cls.request_config.data_build = await page.evaluate("document.documentElement.getAttribute('data-build')")
             cls.request_config.cookies = await page.send(get_cookies([cls.url]))
@@ -1137,7 +1131,7 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
             cls._create_request_args(cls.request_config.cookies, cls.request_config.headers, user_agent=user_agent)
             cls._set_api_key(cls._api_key)
             debug.log(f"OpenaiChat: Sleep 10s")
-            await asyncio.sleep(10)
+            await asyncio.sleep(2)
 
     @staticmethod
     def get_default_headers() -> Dict[str, str]:

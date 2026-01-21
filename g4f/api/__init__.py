@@ -347,8 +347,8 @@ class Api:
                     "object": "model",
                     "created": 0,
                     "owned_by": "",
-                    "image": isinstance(model, g4f.models.ImageModel),
-                    "vision": isinstance(model, g4f.models.VisionModel),
+                    "image": (bool(getattr(g4f.models.ModelUtils.get_model(model), "image_generation", False)) or model in image_models) if isinstance(model, str) else isinstance(model, g4f.models.ImageModel),
+                    "vision": (bool(getattr(g4f.models.ModelUtils.get_model(model), "vision", False)) or model in vision_models) if isinstance(model, str) else isinstance(model, g4f.models.VisionModel),
                     "provider": False,
                 } for model in AnyProvider.get_models()] +
                 [{
@@ -522,7 +522,11 @@ class Api:
                         yield f'data: {format_exception(e, config)}\n\n'
                     yield "data: [DONE]\n\n"
 
-                return StreamingResponse(streaming(), media_type="text/event-stream")
+                return StreamingResponse(
+                    streaming(),
+                    media_type="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+                )
 
             except (ModelNotFoundError, ProviderNotFoundError) as e:
                 logger.exception(e)

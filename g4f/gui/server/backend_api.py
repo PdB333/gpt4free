@@ -152,8 +152,8 @@ class Backend_Api(Api):
         def get_demo_models():
             return [{
                 "name": model.name,
-                "image": isinstance(model, models.ImageModel),
-                "vision": isinstance(model, models.VisionModel),
+                "image": isinstance(model, models.ImageModel) or getattr(model, "image_generation", False),
+                "vision": isinstance(model, models.VisionModel) or getattr(model, "vision", False),
                 "audio": isinstance(model, models.AudioModel),
                 "video": isinstance(model, models.VideoModel),
                 "providers": [

@@ -42,6 +42,7 @@ REQUEST_HEADERS = {
 }
 REQUEST_BL_PARAM = "boq_assistant-bard-web-server_20240519.16_p0"
 REQUEST_URL = "https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate"
+REQUEST_URL_V3 = "https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerateV3"
 UPLOAD_IMAGE_URL = "https://content-push.googleapis.com/upload/"
 UPLOAD_IMAGE_HEADERS = {
     "authority": "content-push.googleapis.com",
@@ -72,6 +73,8 @@ models = {
     "gemini-2.0-flash-thinking-with-apps": {"x-goog-ext-525001261-jspb": '[null,null,null,null,"f8f8f5ea629f5d37"]'},
     # Currently used models
     "gemini-3-pro": {"x-goog-ext-525001261-jspb": '[1,null,null,null,"9d8ca3786ebdfbea",null,null,0,[4]]'},
+    "gemini-3-rapid": {"x-goog-ext-525001261-jspb": '[1,null,null,null,"9d8ca3786ebdfbea",null,null,0,[4]]'},
+    "gemini-3-reasoning": {"x-goog-ext-525001261-jspb": '[1,null,null,null,"9d8ca3786ebdfbea",null,null,0,[4]]'},
     "gemini-2.5-pro": {"x-goog-ext-525001261-jspb": '[1,null,null,null,"61530e79959ab139",null,null,null,[4]]'},
     "gemini-2.5-flash": {"x-goog-ext-525001261-jspb": '[1,null,null,null,"9ec249fc9ad08861",null,null,null,[4]]'},
     "gemini-audio": {}
@@ -91,7 +94,7 @@ class Gemini(AsyncGeneratorProvider, ProviderModelMixin):
     default_vision_model = default_model
     image_models = [default_image_model]
     models = [
-        default_model, "gemini-3-pro", "gemini-2.5-flash", "gemini-2.5-pro"
+        default_model, "gemini-3-rapid", "gemini-3-pro", "gemini-3-reasoning", "gemini-2.5-flash", "gemini-2.5-pro"
     ]
 
     synthesize_content_type = "audio/vnd.wav"
@@ -177,7 +180,7 @@ class Gemini(AsyncGeneratorProvider, ProviderModelMixin):
         cls._cookies = cookies or cls._cookies or get_cookies(GOOGLE_COOKIE_DOMAIN, False, True)
         if conversation is not None and getattr(conversation, "model", None) != model:
             conversation = None
-        prompt = format_prompt(messages) if conversation is None else get_last_user_message(messages)
+        prompt = format_prompt(messages)
         base_connector = get_connector(connector, proxy)
 
         async with ClientSession(
@@ -205,7 +208,16 @@ class Gemini(AsyncGeneratorProvider, ProviderModelMixin):
                         cls.start_auto_refresh()
                     )
 
-            uploads = await cls.upload_images(base_connector, merge_media(media, messages))
+            merged_media = list(merge_media(media, messages))
+            inline_media = []
+            upload_media = []
+            for media_item, media_name in merged_media:
+                if isinstance(media_item, str) and media_item.startswith("data:"):
+                    inline_media.append([media_item, media_name])
+                else:
+                    upload_media.append((media_item, media_name))
+            uploads = await cls.upload_images(base_connector, upload_media) if upload_media else []
+            uploads.extend(inline_media)
             async with ClientSession(
                 cookies=cls._cookies,
                 headers=REQUEST_HEADERS,
@@ -218,17 +230,22 @@ class Gemini(AsyncGeneratorProvider, ProviderModelMixin):
                     'rt': 'c',
                     "f.sid": cls._sid,
                 }
+                generation_config = None
+                request_url = REQUEST_URL_V3 if model.startswith("gemini-3") else REQUEST_URL
+                if model == "gemini-3-rapid":
+                    generation_config = {"temperature": 0.2, "topK": 1}
                 data = {
                     'at': cls._snlm0e,
                     'f.req': json.dumps([None, json.dumps(cls.build_request(
                         prompt,
                         language=language,
                         conversation=conversation,
-                        uploads=uploads
+                        uploads=uploads,
+                        generation_config=generation_config
                     ))])
                 }
                 async with client.post(
-                    REQUEST_URL,
+                    request_url,
                     data=data,
                     params=params,
                     headers=models[model] if model in models else None
@@ -358,10 +375,11 @@ class Gemini(AsyncGeneratorProvider, ProviderModelMixin):
         language: str,
         conversation: Conversation = None,
         uploads: list[list[str, str]] = None,
-        tools: list[list[str]] = []
+        tools: list[list[str]] = [],
+        generation_config: dict | None = None
     ) -> list:
         image_list = [[[image_url, 1], image_name] for image_url, image_name in uploads] if uploads else []
-        return [
+        request = [
             [prompt, 0, None, image_list, None, None, 0],
             [language],
             [
@@ -382,6 +400,9 @@ class Gemini(AsyncGeneratorProvider, ProviderModelMixin):
             1,
             0,
         ]
+        if generation_config:
+            request.append(generation_config)
+        return request
 
     async def upload_images(connector: BaseConnector, media: MediaListType) -> list:
         async def upload_image(image: bytes, image_name: str = None):
